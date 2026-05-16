@@ -17,6 +17,7 @@ AI 助手在执行任何需求前，必须先理解：
 - “安排”模块是候选人后续需要根据题目新增的能力，初始项目不应预置安排模块实现。
 - 每次迭代都必须更新当前候选人在 `docs/codex-logs/` 下的个人 Markdown 日志。
 - 每次迭代也必须同步更新 `src/data/aiConversationLog.ts`，让应用内“和AI编程工具对话”能展示本轮输入输出。
+- 所有 Codex 历史都应统一收敛到当前个人 Markdown 日志和 `src/data/aiConversationLog.ts`。不要再维护 `docs/codex-archives/` 或 `src/data/ai-conversation-archives/`；如果发现旧归档，先合并到统一日志和 UI 数据源，再删除归档目录。
 - 首次读取规范后，AI 助手需要运行 `pnpm setup:git-hooks`。`pnpm install` 也会自动执行同一设置；设置完成后，候选人 `git push` 到 GitHub 前会自动运行 `pnpm verify:answer`。
 
 ## 新一轮对话前置检查
@@ -42,16 +43,11 @@ AI 助手在执行任何需求前，必须先理解：
 6. 完成后运行必要验证，至少包括 `pnpm lint` 和 `pnpm build`。
 7. 将本轮时间、用户输入、AI 最终输出、改动文件、验证结果追加到当前候选人的个人 Markdown 日志。
 8. 将同一轮记录追加到 `src/data/aiConversationLog.ts` 的 `aiConversationLogEntries`，保持界面展示与 Markdown 日志一致。
-9. 如果外部面试平台或上层提示词提供了云端上报环境变量，在本轮记录写入完成后运行 `pnpm codex:upload-interview`，把更新后的个人 Markdown 日志和 `src/data/aiConversationLog.ts` 上传到 OSS。这里的“实时”指每次完整的用户输入和 AI 回复结束后触发一次，不是按秒流式同步。
-
-云端上报需要外部显式提供：
-
-- `CODEX_INTERVIEW_CANDIDATE_UID`
-- `CODEX_INTERVIEW_EXAM_KEY`
+9. 如果外部面试平台或上层提示词提供了云端上报环境变量，在本轮记录写入完成后运行 `pnpm codex:upload-interview`，把更新后的个人 Markdown 日志和 `src/data/aiConversationLog.ts` 上传到 OSS。这里的“实时”指每次完整的用户输入和 AI 回复结束后触发一次，不是按秒流式同步。每次上传的都是当前候选人个人 Markdown 日志和 `src/data/aiConversationLog.ts` 的完整文件，包含该候选人日志初始化以来所有已记录轮次，不是从首次启用云端上传开始的增量。
 
 默认服务 Host 为 `https://team.jotmo.cc`。如需覆盖默认 Host，可额外提供 `CODEX_INTERVIEW_API_BASE`。
 
-缺少任一字段时，不允许从姓名、本机用户名、Git 信息、目录名或时间戳推断；应完成本地记录，并说明云端上报缺少必要参数。
+`candidate_uid` 和 `exam_key` 由 `register` 接口签发或复用，并写回 `.codex/candidate-session.json`。不允许从姓名、本机用户名、Git 信息、目录名或时间戳推断，也不允许手工生成。
 
 ## 最终输出测试链接
 

@@ -29,16 +29,6 @@ function readJson(path, label) {
   }
 }
 
-function readRequiredEnv(name) {
-  const value = process.env[name]?.trim();
-
-  if (!value) {
-    fail(`missing ${name}`);
-  }
-
-  return value;
-}
-
 function normalizeApiBase(value) {
   try {
     const url = new URL(value);
@@ -48,8 +38,24 @@ function normalizeApiBase(value) {
   }
 }
 
+function writeSession(session) {
+  writeFileSync(sessionPath, `${JSON.stringify(session, null, 2)}\n`, "utf8");
+}
+
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+function countIterationEntries(filePath, content) {
+  if (filePath.endsWith(".md")) {
+    return content.match(/^## \d{4}-\d{2}-\d{2} /gm)?.length ?? 0;
+  }
+
+  if (filePath.endsWith("aiConversationLog.ts")) {
+    return content.match(/timestamp: "/g)?.length ?? 0;
+  }
+
+  return null;
 }
 
 function getCandidateNameFromLog(path) {
@@ -142,26 +148,25 @@ async function main() {
   }
 
   const apiBase = normalizeApiBase(process.env.CODEX_INTERVIEW_API_BASE?.trim() || defaultApiBase);
-  const candidateUid = readRequiredEnv("CODEX_INTERVIEW_CANDIDATE_UID");
-  const examKey = readRequiredEnv("CODEX_INTERVIEW_EXAM_KEY");
   const codexSessionId = process.env.CODEX_INTERVIEW_CODEX_SESSION_ID?.trim() || undefined;
   const candidateName = getCandidateNameFromLog(markdownLogPath);
   const localUsername = userInfo().username || process.env.USER || "local";
 
   const registerBody = {
-    candidate_uid: candidateUid,
     candidate_name: candidateName,
     local_username: localUsername,
-    exam_key: examKey,
     candidate_session_path: sessionPath,
     candidate_markdown_log_path: markdownLogPath,
     ai_conversation_log_path: aiConversationLogPath,
     context_refs: [],
     ...(codexSessionId ? { codex_session_id: codexSessionId } : {}),
   };
+  const dryRunCandidateUid = session.candidateUid ?? "<candidate_uid from register>";
+  const dryRunExamKey = session.examKey ?? "<exam_key from register>";
 
   const targets = getUploadTargets(markdownLogPath).map((target) => {
     const buffer = readFileSync(target.filePath);
+    const content = buffer.toString("utf8");
     const stats = statSync(target.filePath);
 
     return {
@@ -169,6 +174,7 @@ async function main() {
       file_name: basename(target.filePath),
       declared_size: stats.size,
       sha256: sha256(buffer),
+      entry_count: countIterationEntries(target.filePath, content),
       buffer,
     };
   });
@@ -188,13 +194,14 @@ async function main() {
             endpoint: endpoints.prepareUpload,
             url: buildUrl(apiBase, endpoints.prepareUpload),
             prepare_upload_body: {
-              candidate_uid: candidateUid,
-              exam_key: examKey,
+              candidate_uid: dryRunCandidateUid,
+              exam_key: dryRunExamKey,
               artifact_key: target.artifact_key,
               file_name: target.file_name,
               content_type: target.content_type,
               declared_size: target.declared_size,
               sha256: target.sha256,
+              entry_count: target.entry_count,
               ...(codexSessionId ? { codex_session_id: codexSessionId } : {}),
             },
             file_path: target.filePath,
@@ -207,7 +214,23 @@ async function main() {
     return;
   }
 
-  await postJson(apiBase, endpoints.register, registerBody);
+  const registered = await postJson(apiBase, endpoints.register, registerBody);
+  const candidateUid = registered?.candidate_uid;
+  const examKey = registered?.exam_key;
+
+  if (!candidateUid || !examKey) {
+    fail("register response is missing candidate_uid or exam_key");
+  }
+
+  const updatedSession = {
+    ...session,
+    candidateUid,
+    examKey,
+    uploadRegisteredAt: new Date().toISOString(),
+  };
+
+  writeSession(updatedSession);
+  console.log(`registered interview session: candidate_uid=${candidateUid}, exam_key=${examKey}`);
 
   const uploaded = [];
 
@@ -232,13 +255,15 @@ async function main() {
       file_name: target.file_name,
       declared_size: target.declared_size,
       sha256: target.sha256,
+      entry_count: target.entry_count,
       prepare_uid: prepared.prepare_uid,
       object_key: prepared.object_key,
       expire_at: prepared.expire_at,
       ttl_seconds: prepared.ttl_seconds,
     });
 
-    console.log(`uploaded ${target.artifact_key}: ${prepared.object_key}`);
+    const entryCountLabel = target.entry_count === null ? "" : ` (${target.entry_count} entries)`;
+    console.log(`uploaded ${target.artifact_key}${entryCountLabel}: ${prepared.object_key}`);
   }
 
   const state = {

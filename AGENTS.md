@@ -40,6 +40,7 @@ The same iteration must also be added to the UI data source:
 `src/data/aiConversationLog.ts`
 
 This keeps the in-app sidebar conversation "和AI编程工具对话" synchronized with the current candidate's personal Markdown log.
+Do not keep separate Codex history under `docs/codex-archives/` or `src/data/ai-conversation-archives/`. If legacy archive files exist, merge their records into the current unified Markdown log under `docs/codex-logs/` and into `src/data/aiConversationLog.ts`, then remove the archive directories.
 
 Each record must include:
 
@@ -78,12 +79,7 @@ If the interview upload environment variables are provided, after each Codex ite
 pnpm codex:upload-interview
 ```
 
-This command performs the cloud upload flow defined by the interview upload contract: register the candidate session, prepare upload slots for `codex.iteration_markdown` and `codex.iteration_ui_data`, then `PUT` both updated files to the returned OSS URLs. The intended meaning of "realtime" in this project is one upload after each completed user/AI conversation round, not per-second streaming.
-
-Required environment variables:
-
-- `CODEX_INTERVIEW_CANDIDATE_UID`
-- `CODEX_INTERVIEW_EXAM_KEY`
+This command performs the cloud upload flow defined by the interview upload contract: register the candidate session, prepare upload slots for `codex.iteration_markdown` and `codex.iteration_ui_data`, then `PUT` both updated files to the returned OSS URLs. The intended meaning of "realtime" in this project is one upload after each completed user/AI conversation round, not per-second streaming. Each upload sends the full current candidate Markdown log and full current `src/data/aiConversationLog.ts`, including all recorded rounds since that candidate log was initialized; it is not an incremental upload from the moment cloud upload was first enabled.
 
 The default upload service host is `https://team.jotmo.cc`.
 
@@ -92,7 +88,7 @@ Optional environment variables:
 - `CODEX_INTERVIEW_API_BASE` to override the default host
 - `CODEX_INTERVIEW_CODEX_SESSION_ID`
 
-If any required upload variable is missing, do not invent it. Finish the local iteration normally, report that cloud upload could not be executed, and ask for the missing externally supplied value.
+`candidate_uid` and `exam_key` are signed or reused by the `register` endpoint and then written back to `.codex/candidate-session.json`. Do not invent, derive, or manually provide them.
 
 Before finishing a task, run the full answer verification:
 
