@@ -2,4 +2,12 @@
 set -eu
 
 echo "[ArkmeDemo] running pnpm verify:answer before push..."
+if ! command -v pnpm >/dev/null 2>&1; then
+  shim_dir="${TMPDIR:-${TEMP:-/tmp}}/arkme-corepack-shims"
+  mkdir -p "$shim_dir"
+  corepack enable --install-directory "$shim_dir"
+  PATH="$shim_dir:$PATH"
+  export PATH
+fi
+
 pnpm verify:answer
