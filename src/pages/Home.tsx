@@ -6,6 +6,20 @@ import ChatList from "@/components/ChatList";
 import RecordDetailSheet from "@/components/RecordDetailSheet";
 import RecordFullDetailScreen from "@/components/RecordFullDetailScreen";
 import Records from "@/pages/Records";
+import {
+  createArrangementFromDraft,
+  getInitialAiArrangementConfig,
+  getInitialArrangements,
+  persistAiArrangementConfig,
+  persistArrangements,
+  recognizeArrangement,
+  type AiArrangementConfig,
+  type AiArrangementDraft,
+  type ArrangementContextRef,
+  type ArrangementImportance,
+  type ArrangementItem,
+  type ArrangementStatus,
+} from "@/data/arrangements";
 import { aiConversationLogEntries } from "@/data/aiConversationLog";
 import { useCandidateProfile } from "@/data/candidateProfile";
 import {
@@ -57,6 +71,7 @@ type TabItem = {
 
 const tabs: TabItem[] = [
   { key: "records" },
+  { key: "arrangements" },
   { key: "insight" },
   { key: "mine" },
 ];
@@ -329,6 +344,7 @@ function shouldRequestBrowserNotificationPermission() {
 
 export default function Home({ currentPage, onNavigate }: HomeProps) {
   const { t } = usePreferences();
+  const candidateProfile = useCandidateProfile();
   const [showSearch, setShowSearch] = React.useState(false);
   const [showMenu, setShowMenu] = React.useState(false);
   const [showAnswerGuide, setShowAnswerGuide] = React.useState(false);
@@ -361,6 +377,16 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const [testMessages, setTestMessages] = React.useState(getInitialTestMessages);
   const [testReadState, setTestReadState] =
     React.useState<TestReadState>(getInitialTestReadState);
+  const [arrangements, setArrangements] = React.useState(getInitialArrangements);
+  const [arrangementAiConfig, setArrangementAiConfig] = React.useState(
+    getInitialAiArrangementConfig
+  );
+  const [selfArrangementDraft, setSelfArrangementDraft] =
+    React.useState<AiArrangementDraft | null>(null);
+  const [selfArrangementMessage, setSelfArrangementMessage] = React.useState("");
+  const [recognizingSelfArrangementUid, setRecognizingSelfArrangementUid] =
+    React.useState<string | null>(null);
+  const lastAutoRecognizedSelfUidRef = React.useRef<string | null>(null);
   const initializedBrowserNotificationMessagesRef = React.useRef(false);
   const browserNotifiedMessageIdsRef = React.useRef<Set<string>>(new Set());
 
@@ -518,6 +544,14 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         sourceConversation: makeSelfSource(record.uid),
       })),
     [createdSelfRecords, makeSelfSource, selfDemoRecords]
+  );
+  const latestSelfRecord = React.useMemo(
+    () =>
+      selfRecords.reduce<RecordItem | null>((latest, record) => {
+        if (!latest || record.send_at > latest.send_at) return record;
+        return latest;
+      }, null),
+    [selfRecords]
   );
 
   const testConversationRecords = React.useMemo<TestConversationRecord[]>(
@@ -723,6 +757,28 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     testConversationSummaries.find(
       (summary) => summary.conversationId === activeTestIdentityId
     ) ?? null;
+  const arrangementContextRefs = React.useMemo<ArrangementContextRef[]>(
+    () =>
+      testConversationSummaries.flatMap((summary) =>
+        summary.records.map((record) => {
+          const senderName =
+            record.sender === "demo"
+              ? candidateProfile?.name || t("recordDetail.me")
+              : summary.memberIdentities.find((identity) => identity.id === record.identityId)
+                  ?.name ?? summary.title;
+          return {
+            conversationId: summary.conversationId,
+            messageId: record.uid.replace(/^test-/, ""),
+            conversationType: summary.conversationType,
+            senderName,
+            conversationTitle: summary.title,
+            text: record.text_content,
+            sentAt: record.send_at,
+          };
+        })
+      ),
+    [candidateProfile?.name, t, testConversationSummaries]
+  );
 
   const mineStatisticRecords = React.useMemo(
     () => [
@@ -756,6 +812,105 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       return nextHistory;
     });
   }, []);
+
+  const updateArrangements = React.useCallback(
+    (updater: (prev: ArrangementItem[]) => ArrangementItem[]) => {
+      setArrangements((prev) => {
+        const nextArrangements = updater(prev);
+        persistArrangements(nextArrangements);
+        return nextArrangements;
+      });
+    },
+    []
+  );
+
+  const updateArrangementAiConfig = React.useCallback((nextConfig: AiArrangementConfig) => {
+    setArrangementAiConfig(nextConfig);
+    persistAiArrangementConfig(nextConfig);
+  }, []);
+
+  const makeSelfArrangementContextRef = React.useCallback(
+    (record: RecordItem): ArrangementContextRef => ({
+      conversationId: "self",
+      messageId: record.uid,
+      conversationType: "self",
+      senderName: candidateProfile?.name || t("recordDetail.me"),
+      conversationTitle: t("sendToSelf.title"),
+      text: record.text_content,
+      sentAt: record.send_at,
+    }),
+    [candidateProfile?.name, t]
+  );
+
+  const recognizeSelfRecordAsArrangement = React.useCallback(
+    async (record: RecordItem, mode: "auto" | "manual") => {
+      if (!record.text_content.trim()) return;
+      if (recognizingSelfArrangementUid) return;
+
+      setSelfArrangementMessage("");
+      setRecognizingSelfArrangementUid(record.uid);
+      try {
+        const contextRef = makeSelfArrangementContextRef(record);
+        const messageDate = new Date(record.send_at);
+        const inputText = [
+          `Message sent at ISO time: ${messageDate.toISOString()}`,
+          `Message local time: ${messageDate.toLocaleString("zh-CN", {
+            hour12: false,
+          })}`,
+          `Sender: ${contextRef.senderName}`,
+          `Message: ${contextRef.text}`,
+        ].join("\n");
+        const draft = await recognizeArrangement(
+          arrangementAiConfig,
+          inputText,
+          "ai-message",
+          [contextRef]
+        );
+        setSelfArrangementDraft(draft);
+      } catch (error) {
+        if (mode === "manual") {
+          setSelfArrangementMessage(
+            error instanceof Error ? error.message : t("arrangements.aiFailed")
+          );
+        }
+      } finally {
+        setRecognizingSelfArrangementUid(null);
+      }
+    },
+    [
+      arrangementAiConfig,
+      makeSelfArrangementContextRef,
+      recognizingSelfArrangementUid,
+      t,
+    ]
+  );
+
+  React.useEffect(() => {
+    if (!showSendToSelf || !latestSelfRecord) return;
+    if (lastAutoRecognizedSelfUidRef.current === latestSelfRecord.uid) return;
+
+    lastAutoRecognizedSelfUidRef.current = latestSelfRecord.uid;
+    void recognizeSelfRecordAsArrangement(latestSelfRecord, "auto");
+  }, [latestSelfRecord, recognizeSelfRecordAsArrangement, showSendToSelf]);
+
+  const confirmSelfArrangementDraft = React.useCallback(() => {
+    if (!selfArrangementDraft) return;
+    if (!selfArrangementDraft.scheduledAt) {
+      setSelfArrangementMessage(t("arrangements.timeRequired"));
+      return;
+    }
+    updateArrangements((prev) => [
+      createArrangementFromDraft(selfArrangementDraft),
+      ...prev,
+    ]);
+    setSelfArrangementDraft(null);
+    setSelfArrangementMessage(t("arrangements.confirmed"));
+  }, [selfArrangementDraft, t, updateArrangements]);
+
+  const cancelSelfArrangementDraft = React.useCallback(() => {
+    setSelfArrangementDraft(null);
+    setSelfArrangementMessage(t("arrangements.cancelled"));
+  }, [t]);
 
   const createSelfRecord = React.useCallback((content: string) => {
     const timestamp = Date.now();
@@ -1096,6 +1251,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         <SettingsScreen
           onBack={() => setSettingsView(null)}
           onOpenAppearance={() => setSettingsView("appearance")}
+          arrangementAiConfig={arrangementAiConfig}
+          onChangeArrangementAiConfig={updateArrangementAiConfig}
         />
       );
     }
@@ -1120,6 +1277,14 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onCreateRecord={createSelfRecord}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
+          pendingArrangementDraft={selfArrangementDraft}
+          arrangementMessage={selfArrangementMessage}
+          recognizingArrangementUid={recognizingSelfArrangementUid}
+          onRecognizeRecord={(record) => {
+            void recognizeSelfRecordAsArrangement(record, "manual");
+          }}
+          onConfirmArrangement={confirmSelfArrangementDraft}
+          onCancelArrangement={cancelSelfArrangementDraft}
         />
       );
     }
@@ -1166,6 +1331,31 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           records={mineStatisticRecords}
           onOpenSettings={() => setSettingsView("settings")}
           onOpenAbout={() => setSettingsView("about")}
+        />
+      );
+    }
+
+    if (currentPage === "arrangements") {
+      return (
+        <ArrangementsScreen
+          arrangements={arrangements}
+          aiConfig={arrangementAiConfig}
+          contextRefs={arrangementContextRefs}
+          onAddArrangement={(arrangement) =>
+            updateArrangements((prev) => [arrangement, ...prev])
+          }
+          onUpdateArrangement={(arrangement) =>
+            updateArrangements((prev) =>
+              prev.map((item) => (item.id === arrangement.id ? arrangement : item))
+            )
+          }
+          onOpenContext={(ref) => {
+            if (ref.conversationType === "self") {
+              openSendToSelf(ref.messageId);
+              return;
+            }
+            openTestConversation(ref.conversationId, `test-${ref.messageId}`);
+          }}
         />
       );
     }
@@ -1616,17 +1806,17 @@ function recordMatchesQuickType(record: RecordItem, type: QuickSearchType) {
 
   switch (type) {
     case "image":
-      return /图片|照片|视频|image|photo|video/.test(combined);
+      return /鍥剧墖|鐓х墖|瑙嗛|image|photo|video/.test(combined);
     case "audio":
-      return /语音|音频|录音|voice|audio|recording/.test(combined);
+      return /璇煶|闊抽|褰曢煶|voice|audio|recording/.test(combined);
     case "link":
-      return /链接|http|link|url/.test(combined);
+      return /閾炬帴|http|link|url/.test(combined);
     case "file":
-      return /文件|文档|file|document/.test(combined);
+      return /鏂囦欢|鏂囨。|file|document/.test(combined);
     case "longArticle":
       return Array.from(record.text_content).length >= 80;
     case "contact":
-      return /联系人|同事|候选人|用户|ai|contact|user/.test(combined);
+      return /鑱旂郴浜簗鍚屼簨|鍊欓€変汉|鐢ㄦ埛|ai|contact|user/.test(combined);
     default:
       return true;
   }
@@ -2314,6 +2504,12 @@ function SendToSelfConversationChat({
   onCreateRecord,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
+  pendingArrangementDraft,
+  arrangementMessage,
+  recognizingArrangementUid,
+  onRecognizeRecord,
+  onConfirmArrangement,
+  onCancelArrangement,
 }: {
   records: RecordItem[];
   targetUid?: string | null;
@@ -2321,6 +2517,12 @@ function SendToSelfConversationChat({
   onCreateRecord: (content: string) => void;
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
+  pendingArrangementDraft: AiArrangementDraft | null;
+  arrangementMessage: string;
+  recognizingArrangementUid: string | null;
+  onRecognizeRecord: (record: RecordItem) => void;
+  onConfirmArrangement: () => void;
+  onCancelArrangement: () => void;
 }) {
   const { t } = usePreferences();
   const recordsWithoutSource = React.useMemo(
@@ -2365,7 +2567,41 @@ function SendToSelfConversationChat({
         targetRecordUid={targetUid}
         onOpenRecordDetail={onOpenRecordDetail}
         onOpenRecordSnapshot={onOpenRecordSnapshot}
+        renderRecordActions={(record) => {
+          const isRecognizing = recognizingArrangementUid === record.uid;
+          return (
+            <div className="mt-1 flex justify-end px-4 pb-1">
+              <button
+                type="button"
+                className="rounded-full border border-border bg-surface px-2.5 py-1 text-[11px] font-medium leading-4 text-text-tertiary transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => onRecognizeRecord(record)}
+                disabled={Boolean(recognizingArrangementUid)}
+              >
+                {isRecognizing
+                  ? t("arrangements.recognizing")
+                  : t("arrangements.recognizeSelf")}
+              </button>
+            </div>
+          );
+        }}
       />
+      {(pendingArrangementDraft || arrangementMessage) && (
+        <div className="shrink-0 border-t border-border-light bg-bg px-4 py-2">
+          {pendingArrangementDraft && (
+            <ArrangementConfirmationCard
+              draft={pendingArrangementDraft}
+              onConfirm={onConfirmArrangement}
+              onCancel={onCancelArrangement}
+              canConfirm={Boolean(pendingArrangementDraft.scheduledAt)}
+            />
+          )}
+          {arrangementMessage && (
+            <p className="mb-2 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
+              {arrangementMessage}
+            </p>
+          )}
+        </div>
+      )}
       <ChatInput
         onSubmit={onCreateRecord}
         onVoiceSubmit={() => onCreateRecord(t("records.voiceRecord"))}
@@ -2706,6 +2942,820 @@ function MobileBottomNavigation({
   );
 }
 
+function ArrangementsScreen({
+  arrangements,
+  aiConfig,
+  contextRefs,
+  onAddArrangement,
+  onUpdateArrangement,
+  onOpenContext,
+}: {
+  arrangements: ArrangementItem[];
+  aiConfig: AiArrangementConfig;
+  contextRefs: ArrangementContextRef[];
+  onAddArrangement: (arrangement: ArrangementItem) => void;
+  onUpdateArrangement: (arrangement: ArrangementItem) => void;
+  onOpenContext: (ref: ArrangementContextRef) => void;
+}) {
+  const { resolvedLocale, t } = usePreferences();
+  const [peopleFilter, setPeopleFilter] = React.useState("all");
+  const [timeFilter, setTimeFilter] = React.useState("all");
+  const [placeFilter, setPlaceFilter] = React.useState("all");
+  const [selectedArrangement, setSelectedArrangement] =
+    React.useState<ArrangementItem | null>(null);
+  const [showCreateArrangement, setShowCreateArrangement] = React.useState(false);
+  const [naturalInput, setNaturalInput] = React.useState("");
+  const [manualTitle, setManualTitle] = React.useState("");
+  const [manualDescription, setManualDescription] = React.useState("");
+  const [manualPeople, setManualPeople] = React.useState("");
+  const [manualTime, setManualTime] = React.useState("");
+  const [manualScheduledAt, setManualScheduledAt] = React.useState("");
+  const [manualPlace, setManualPlace] = React.useState("");
+  const [manualImportance, setManualImportance] =
+    React.useState<ArrangementImportance>(2);
+  const [pendingDraft, setPendingDraft] = React.useState<AiArrangementDraft | null>(
+    null
+  );
+  const [recognitionMessage, setRecognitionMessage] = React.useState("");
+  const [isRecognizing, setIsRecognizing] = React.useState(false);
+
+  const filterOptions = React.useMemo(() => {
+    const people = new Set<string>();
+    const times = new Set<string>();
+    const places = new Set<string>();
+    arrangements.forEach((arrangement) => {
+      arrangement.people.forEach((person) => people.add(person));
+      times.add(formatArrangementTime(arrangement, t, resolvedLocale));
+      if (arrangement.place) places.add(arrangement.place);
+    });
+    return {
+      people: Array.from(people),
+      times: Array.from(times),
+      places: Array.from(places),
+    };
+  }, [arrangements, resolvedLocale, t]);
+
+  const sortedArrangements = React.useMemo(
+    () =>
+      [...arrangements]
+        .filter((arrangement) => {
+          const matchesPeople =
+            peopleFilter === "all" || arrangement.people.includes(peopleFilter);
+          const matchesTime =
+            timeFilter === "all" ||
+            formatArrangementTime(arrangement, t, resolvedLocale) === timeFilter;
+          const matchesPlace = placeFilter === "all" || arrangement.place === placeFilter;
+          return matchesPeople && matchesTime && matchesPlace;
+        })
+        .sort((left, right) => {
+          if (right.importance !== left.importance) {
+            return right.importance - left.importance;
+          }
+          return right.updatedAt - left.updatedAt;
+        }),
+    [arrangements, peopleFilter, placeFilter, resolvedLocale, t, timeFilter]
+  );
+
+  const resetManualForm = () => {
+    setManualTitle("");
+    setManualDescription("");
+    setManualPeople("");
+    setManualTime("");
+    setManualScheduledAt("");
+    setManualPlace("");
+    setManualImportance(2);
+  };
+
+  const fillFormFromDraft = (draft: AiArrangementDraft) => {
+    setManualTitle(draft.title);
+    setManualDescription(draft.description);
+    setManualPeople(draft.people.join("、"));
+    setManualTime(draft.timeText);
+    setManualScheduledAt(formatDateTimeLocalInput(draft.scheduledAt));
+    setManualPlace(draft.place);
+    setManualImportance(draft.importance);
+  };
+
+  const recognizeNaturalInput = async () => {
+    setRecognitionMessage("");
+    setIsRecognizing(true);
+    try {
+      const now = new Date();
+      const draft = await recognizeArrangement(
+        aiConfig,
+        [
+          `Current ISO time: ${now.toISOString()}`,
+          `Current local time: ${now.toLocaleString("zh-CN", { hour12: false })}`,
+          `Content: ${naturalInput}`,
+        ].join("\n"),
+        "ai-manual-input",
+        []
+      );
+      setPendingDraft(draft);
+      fillFormFromDraft(draft);
+    } catch (error) {
+      setRecognitionMessage(error instanceof Error ? error.message : t("arrangements.aiFailed"));
+    } finally {
+      setIsRecognizing(false);
+    }
+  };
+
+  const recognizeMessages = async () => {
+    setRecognitionMessage("");
+    setIsRecognizing(true);
+    try {
+      const latestContextRefs = contextRefs
+        .slice()
+        .sort((left, right) => right.sentAt - left.sentAt)
+        .slice(0, 12)
+        .reverse();
+      if (latestContextRefs.length === 0) {
+        setRecognitionMessage(t("arrangements.noMessageContext"));
+        return;
+      }
+      const messageContent = latestContextRefs
+        .map(
+          (ref) =>
+            `[${ref.conversationTitle}] ${ref.senderName} at ${new Date(
+              ref.sentAt
+            ).toISOString()}: ${ref.text}`
+        )
+        .join("\n");
+      const draft = await recognizeArrangement(
+        aiConfig,
+        messageContent,
+        "ai-message",
+        latestContextRefs
+      );
+      setPendingDraft(draft);
+      fillFormFromDraft(draft);
+    } catch (error) {
+      setRecognitionMessage(error instanceof Error ? error.message : t("arrangements.aiFailed"));
+    } finally {
+      setIsRecognizing(false);
+    }
+  };
+
+  const confirmDraft = () => {
+    if (!pendingDraft) return;
+    if (!pendingDraft.scheduledAt) {
+      setRecognitionMessage(t("arrangements.timeRequired"));
+      return;
+    }
+    onAddArrangement(createArrangementFromDraft(pendingDraft));
+    setPendingDraft(null);
+    setNaturalInput("");
+    setRecognitionMessage(t("arrangements.confirmed"));
+    setShowCreateArrangement(false);
+  };
+
+  const cancelDraft = () => {
+    setPendingDraft(null);
+    setRecognitionMessage(t("arrangements.cancelled"));
+  };
+
+  const createManualArrangement = () => {
+    const title = manualTitle.trim();
+    if (!title) {
+      setRecognitionMessage(t("arrangements.titleRequired"));
+      return;
+    }
+    const scheduledAt = parseDateTimeLocalInput(manualScheduledAt);
+    if (!scheduledAt) {
+      setRecognitionMessage(t("arrangements.timeRequired"));
+      return;
+    }
+
+    onAddArrangement(
+      createArrangementFromDraft({
+        title,
+        description: manualDescription,
+        people: splitInlineList(manualPeople),
+        timeText: manualTime,
+        scheduledAt,
+        place: manualPlace,
+        importance: manualImportance,
+        contextRefs: pendingDraft?.contextRefs ?? [],
+        source: pendingDraft ? pendingDraft.source : "manual",
+      })
+    );
+    resetManualForm();
+    setPendingDraft(null);
+    setNaturalInput("");
+    setRecognitionMessage(t("arrangements.created"));
+    setShowCreateArrangement(false);
+  };
+
+  const updateSelectedArrangement = (nextArrangement: ArrangementItem) => {
+    setSelectedArrangement(nextArrangement);
+    onUpdateArrangement(nextArrangement);
+  };
+
+  if (selectedArrangement) {
+    return (
+      <ArrangementDetailScreen
+        arrangement={selectedArrangement}
+        onBack={() => setSelectedArrangement(null)}
+        onUpdateArrangement={updateSelectedArrangement}
+        onOpenContext={onOpenContext}
+      />
+    );
+  }
+
+  if (showCreateArrangement) {
+    return (
+      <div className="flex h-full flex-col bg-bg">
+        <MobilePageHeader
+          title={t("arrangements.createTitle")}
+          onBack={() => setShowCreateArrangement(false)}
+        />
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-3">
+          <section className="rounded-[14px] bg-surface px-3 pb-3 pt-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-[15px] font-semibold leading-5 text-text">
+                  {t("arrangements.createTitle")}
+                </h2>
+                <p className="mt-1 text-xs leading-4 text-text-tertiary">
+                  {t("arrangements.createDesc")}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="h-9 shrink-0 rounded-full border border-border bg-bg px-3 text-xs font-semibold text-text transition active:scale-[0.98]"
+                onClick={recognizeMessages}
+                disabled={isRecognizing}
+              >
+                {isRecognizing
+                  ? t("arrangements.recognizing")
+                  : t("arrangements.scanMessages")}
+              </button>
+            </div>
+            <textarea
+              value={naturalInput}
+              onChange={(event) => setNaturalInput(event.target.value)}
+              placeholder={t("arrangements.naturalPlaceholder")}
+              className="mt-3 min-h-[72px] w-full resize-none rounded-[12px] border border-border bg-bg px-3 py-2 text-sm leading-5 text-text outline-none placeholder:text-text-disabled focus:border-primary"
+            />
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className="h-10 rounded-[10px] border border-border bg-bg text-sm font-semibold text-text transition active:scale-[0.98]"
+                onClick={recognizeNaturalInput}
+                disabled={isRecognizing}
+              >
+                {isRecognizing ? t("arrangements.recognizing") : t("arrangements.aiBreakdown")}
+              </button>
+              <button
+                type="button"
+                className="h-10 rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.98]"
+                onClick={createManualArrangement}
+              >
+                {t("arrangements.createManual")}
+              </button>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <FormInput
+                label={t("arrangements.fieldTitle")}
+                value={manualTitle}
+                onChange={setManualTitle}
+              />
+              <FormInput
+                label={t("arrangements.fieldPeople")}
+                value={manualPeople}
+                onChange={setManualPeople}
+              />
+              <FormInput
+                label={t("arrangements.fieldTime")}
+                value={manualTime}
+                onChange={setManualTime}
+              />
+              <FormInput
+                label={t("arrangements.fieldScheduledAt")}
+                value={manualScheduledAt}
+                onChange={setManualScheduledAt}
+                type="datetime-local"
+              />
+              <FormInput
+                label={t("arrangements.fieldPlace")}
+                value={manualPlace}
+                onChange={setManualPlace}
+              />
+            </div>
+            <label className="mt-2 block">
+              <span className="text-xs font-medium leading-4 text-text-tertiary">
+                {t("arrangements.fieldDescription")}
+              </span>
+              <input
+                value={manualDescription}
+                onChange={(event) => setManualDescription(event.target.value)}
+                className="mt-1 h-10 w-full rounded-[10px] border border-border bg-bg px-3 text-sm text-text outline-none focus:border-primary"
+              />
+            </label>
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-xs text-text-tertiary">
+                {t("arrangements.importance")}
+              </span>
+              {[1, 2, 3].map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  className={cn(
+                    "h-8 flex-1 rounded-[9px] border text-xs font-semibold transition active:scale-[0.98]",
+                    manualImportance === level
+                      ? "border-primary bg-primary-soft text-primary"
+                      : "border-border bg-bg text-text-tertiary"
+                  )}
+                  onClick={() => setManualImportance(level as ArrangementImportance)}
+                >
+                  {t(`arrangements.importance${level}`)}
+                </button>
+              ))}
+            </div>
+            {pendingDraft && (
+              <ArrangementConfirmationCard
+                draft={pendingDraft}
+                onConfirm={confirmDraft}
+                onCancel={cancelDraft}
+                canConfirm={Boolean(pendingDraft.scheduledAt)}
+              />
+            )}
+            {recognitionMessage && (
+              <p className="mt-2 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
+                {recognitionMessage}
+              </p>
+            )}
+          </section>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <header className="shrink-0 bg-bg px-4 pb-2 pt-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-[22px] font-bold leading-7 text-text">
+              {t("arrangements.title")}
+            </h1>
+            <p className="mt-1 text-xs leading-4 text-text-tertiary">
+              {t("arrangements.subtitle")}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="h-9 rounded-full border border-border bg-surface px-3 text-xs font-semibold text-text transition active:scale-[0.98]"
+            onClick={() => setShowCreateArrangement(true)}
+          >
+            {t("arrangements.add")}
+          </button>
+        </div>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <FilterSelect
+            label={t("arrangements.filterPeople")}
+            value={peopleFilter}
+            options={filterOptions.people}
+            onChange={setPeopleFilter}
+          />
+          <FilterSelect
+            label={t("arrangements.filterTime")}
+            value={timeFilter}
+            options={filterOptions.times}
+            onChange={setTimeFilter}
+          />
+          <FilterSelect
+            label={t("arrangements.filterPlace")}
+            value={placeFilter}
+            options={filterOptions.places}
+            onChange={setPlaceFilter}
+          />
+        </div>
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">
+        <section className="space-y-3">
+          {sortedArrangements.length > 0 ? (
+            sortedArrangements.map((arrangement) => (
+              <ArrangementCard
+                key={arrangement.id}
+                arrangement={arrangement}
+                locale={resolvedLocale}
+                onClick={() => setSelectedArrangement(arrangement)}
+              />
+            ))
+          ) : (
+            <div className="rounded-[14px] bg-surface px-4 py-8 text-center">
+              <p className="text-sm font-semibold text-text">
+                {t("arrangements.emptyTitle")}
+              </p>
+              <p className="mt-1 text-xs text-text-tertiary">
+                {t("arrangements.emptyDesc")}
+              </p>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  const { t } = usePreferences();
+  return (
+    <label className="block">
+      <span className="sr-only">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-9 w-full rounded-[10px] border border-border bg-surface px-2 text-xs font-medium text-text outline-none"
+      >
+        <option value="all">
+          {label} 路 {t("arrangements.all")}
+        </option>
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function FormInput({
+  label,
+  value,
+  onChange,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium leading-4 text-text-tertiary">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 h-10 w-full rounded-[10px] border border-border bg-bg px-3 text-sm text-text outline-none focus:border-primary"
+      />
+    </label>
+  );
+}
+
+function ArrangementCard({
+  arrangement,
+  locale,
+  onClick,
+}: {
+  arrangement: ArrangementItem;
+  locale: string;
+  onClick: () => void;
+}) {
+  const { t } = usePreferences();
+  const important = arrangement.importance === 3;
+  return (
+    <button
+      type="button"
+      className={cn(
+        "w-full rounded-[14px] px-4 py-3 text-left shadow-[0_1px_3px_rgba(15,23,42,0.05)] transition active:scale-[0.99]",
+        important ? "bg-[rgba(148,163,184,0.18)]" : "bg-surface"
+      )}
+      onClick={onClick}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="line-clamp-2 text-[16px] font-semibold leading-5 text-text">
+            {arrangement.title}
+          </h2>
+          <p className="mt-1 text-xs leading-4 text-text-tertiary">
+            {formatArrangementMeta(arrangement, t, locale)}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-full bg-bg px-2 py-1 text-[11px] font-medium text-text-tertiary">
+          {t(`arrangements.status.${arrangement.status}`)}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <ArrangementChip label={t(`arrangements.importance${arrangement.importance}`)} />
+        <ArrangementChip
+          label={t("arrangements.contextCount").replace(
+            "{count}",
+            String(arrangement.contextRefs.length)
+          )}
+        />
+        {arrangement.updatedAt && (
+          <ArrangementChip
+            label={new Intl.DateTimeFormat(locale, {
+              month: "numeric",
+              day: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            }).format(arrangement.updatedAt)}
+          />
+        )}
+      </div>
+    </button>
+  );
+}
+
+function ArrangementChip({ label }: { label: string }) {
+  return (
+    <span className="rounded-full bg-bg px-2 py-1 text-[11px] leading-4 text-text-tertiary">
+      {label}
+    </span>
+  );
+}
+
+function ArrangementConfirmationCard({
+  draft,
+  onConfirm,
+  onCancel,
+  canConfirm = true,
+}: {
+  draft: AiArrangementDraft;
+  onConfirm: () => void;
+  onCancel: () => void;
+  canConfirm?: boolean;
+}) {
+  const { resolvedLocale, t } = usePreferences();
+  return (
+    <div className="mt-3 rounded-[12px] border border-primary/30 bg-primary-soft px-3 py-3">
+      <h3 className="text-[15px] font-semibold leading-5 text-text">
+        {draft.title}
+      </h3>
+      <p className="mt-1 text-xs leading-4 text-text-tertiary">
+        {formatDraftMeta(draft, t, resolvedLocale)}
+      </p>
+      {!canConfirm && (
+        <p className="mt-2 rounded-[10px] bg-bg px-3 py-2 text-xs leading-4 text-primary">
+          {t("arrangements.timeRequired")}
+        </p>
+      )}
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          className="h-9 rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={onConfirm}
+          disabled={!canConfirm}
+        >
+          {t("arrangements.confirm")}
+        </button>
+        <button
+          type="button"
+          className="h-9 rounded-[10px] border border-border bg-bg text-sm font-semibold text-text transition active:scale-[0.98]"
+          onClick={onCancel}
+        >
+          {t("arrangements.cancel")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ArrangementDetailScreen({
+  arrangement,
+  onBack,
+  onUpdateArrangement,
+  onOpenContext,
+}: {
+  arrangement: ArrangementItem;
+  onBack: () => void;
+  onUpdateArrangement: (arrangement: ArrangementItem) => void;
+  onOpenContext: (ref: ArrangementContextRef) => void;
+}) {
+  const { resolvedLocale, t } = usePreferences();
+
+  const updateStatus = (status: ArrangementStatus) => {
+    onUpdateArrangement({ ...arrangement, status, updatedAt: Date.now() });
+  };
+
+  const updateImportance = (importance: ArrangementImportance) => {
+    onUpdateArrangement({ ...arrangement, importance, updatedAt: Date.now() });
+  };
+
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <MobilePageHeader title={t("arrangements.detailTitle")} onBack={onBack} />
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-3">
+        <section className="rounded-[14px] bg-surface px-4 py-4">
+          <h1 className="text-[20px] font-bold leading-7 text-text">
+            {arrangement.title}
+          </h1>
+          {arrangement.description && (
+            <p className="mt-2 text-sm leading-5 text-text-muted">
+              {arrangement.description}
+            </p>
+          )}
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <ArrangementChip
+              label={formatArrangementMeta(arrangement, t, resolvedLocale)}
+            />
+            <ArrangementChip
+              label={t("arrangements.contextCount").replace(
+                "{count}",
+                String(arrangement.contextRefs.length)
+              )}
+            />
+          </div>
+        </section>
+
+        <section className="mt-3 rounded-[14px] bg-surface px-4 py-4">
+          <h2 className="text-sm font-semibold text-text">
+            {t("arrangements.statusTitle")}
+          </h2>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            {(["pending", "done", "later"] as ArrangementStatus[]).map((status) => (
+              <button
+                key={status}
+                type="button"
+                className={cn(
+                  "h-9 rounded-[10px] border text-xs font-semibold transition active:scale-[0.98]",
+                  arrangement.status === status
+                    ? "border-primary bg-primary-soft text-primary"
+                    : "border-border bg-bg text-text-tertiary"
+                )}
+                onClick={() => updateStatus(status)}
+              >
+                {t(`arrangements.status.${status}`)}
+              </button>
+            ))}
+          </div>
+          <h2 className="mt-4 text-sm font-semibold text-text">
+            {t("arrangements.importance")}
+          </h2>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            {([1, 2, 3] as ArrangementImportance[]).map((level) => (
+              <button
+                key={level}
+                type="button"
+                className={cn(
+                  "h-9 rounded-[10px] border text-xs font-semibold transition active:scale-[0.98]",
+                  arrangement.importance === level
+                    ? "border-primary bg-primary-soft text-primary"
+                    : "border-border bg-bg text-text-tertiary"
+                )}
+                onClick={() => updateImportance(level)}
+              >
+                {t(`arrangements.importance${level}`)}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="mt-3 rounded-[14px] bg-surface px-4 py-4">
+          <h2 className="text-sm font-semibold text-text">
+            {t("arrangements.contextTitle")}
+          </h2>
+          <div className="mt-3 space-y-2">
+            {arrangement.contextRefs.length > 0 ? (
+              arrangement.contextRefs.map((ref) => (
+                <button
+                  key={`${ref.conversationId}-${ref.messageId}`}
+                  type="button"
+                  className="w-full rounded-[12px] bg-bg px-3 py-2 text-left transition active:scale-[0.99]"
+                  onClick={() => onOpenContext(ref)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="truncate text-xs font-semibold text-text">
+                      {ref.conversationTitle} 路 {ref.senderName}
+                    </p>
+                    <span className="shrink-0 text-[11px] text-text-disabled">
+                      {new Intl.DateTimeFormat(resolvedLocale, {
+                        month: "numeric",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      }).format(ref.sentAt)}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-3 text-xs leading-4 text-text-muted">
+                    {ref.text}
+                  </p>
+                </button>
+              ))
+            ) : (
+              <p className="rounded-[12px] bg-bg px-3 py-4 text-center text-xs text-text-tertiary">
+                {t("arrangements.noContext")}
+              </p>
+            )}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function splitInlineList(value: string) {
+  return value
+    .split(/[、,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseDateTimeLocalInput(value: string) {
+  if (!value) return null;
+  const parsedTime = new Date(value).getTime();
+  return Number.isFinite(parsedTime) ? parsedTime : null;
+}
+
+function formatDateTimeLocalInput(value: number | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  const pad = (item: number) => String(item).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function getDayStart(value: Date) {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+}
+
+function formatArrangementTime(
+  arrangement: Pick<ArrangementItem, "scheduledAt" | "timeText">,
+  t: ReturnType<typeof usePreferences>["t"],
+  locale: string
+) {
+  if (!arrangement.scheduledAt) return t("arrangements.timePending");
+
+  const scheduledDate = new Date(arrangement.scheduledAt);
+  const todayStart = getDayStart(new Date());
+  const scheduledStart = getDayStart(scheduledDate);
+  const dayDiff = Math.round((scheduledStart - todayStart) / (1000 * 60 * 60 * 24));
+  const time = new Intl.DateTimeFormat(locale, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(scheduledDate);
+
+  let dayLabel: string;
+  if (dayDiff === 0) {
+    dayLabel = t("arrangements.today");
+  } else if (dayDiff === 1) {
+    dayLabel = t("arrangements.tomorrow");
+  } else if (dayDiff === 2) {
+    dayLabel = t("arrangements.dayAfterTomorrow");
+  } else if (dayDiff > 2 && dayDiff < 7) {
+    dayLabel = new Intl.DateTimeFormat(locale, { weekday: "long" }).format(
+      scheduledDate
+    );
+  } else {
+    dayLabel = new Intl.DateTimeFormat(locale, {
+      month: "numeric",
+      day: "numeric",
+    }).format(scheduledDate);
+  }
+
+  return `${dayLabel} ${time}`;
+}
+
+function formatArrangementMeta(
+  arrangement: Pick<
+    ArrangementItem,
+    "people" | "timeText" | "scheduledAt" | "place"
+  >,
+  t: ReturnType<typeof usePreferences>["t"],
+  locale: string
+) {
+  const scheduledLabel = formatArrangementTime(arrangement, t, locale);
+  const timeDetail =
+    arrangement.timeText && arrangement.timeText !== scheduledLabel
+      ? `${scheduledLabel} 路 ${arrangement.timeText}`
+      : scheduledLabel;
+  return [
+    arrangement.people.length > 0 ? arrangement.people.join("、") : "",
+    timeDetail,
+    arrangement.place,
+  ]
+    .filter(Boolean)
+    .join(" 路 ") || t("arrangements.noMeta");
+}
+
+function formatDraftMeta(
+  draft: Pick<
+    AiArrangementDraft,
+    "people" | "timeText" | "scheduledAt" | "place"
+  >,
+  t: ReturnType<typeof usePreferences>["t"],
+  locale: string
+) {
+  return formatArrangementMeta(draft, t, locale);
+}
+
 function InsightPreview() {
   const { t } = usePreferences();
 
@@ -2958,8 +4008,8 @@ function AboutScreen({ onBack }: { onBack: () => void }) {
   ];
   const footerRecords = [
     "ICP备案号：鄂ICP备2024037215号",
-    "增值电信业务经营许可证：鄂B2-20240478",
-    "模型名称：DeepSeek-R1",
+    "澧炲€肩數淇′笟鍔＄粡钀ヨ鍙瘉锛氶剛B2-20240478",
+    "妯″瀷鍚嶇О锛欴eepSeek-R1",
     "互联网信息服务算法备案号：网信算备330110507206401230035号",
     "软著：软著登字第14519261号",
     "森奇思(武汉)科技有限公司",
@@ -3110,12 +4160,27 @@ function MineActionCard({
 function SettingsScreen({
   onBack,
   onOpenAppearance,
+  arrangementAiConfig,
+  onChangeArrangementAiConfig,
 }: {
   onBack: () => void;
   onOpenAppearance: () => void;
+  arrangementAiConfig: AiArrangementConfig;
+  onChangeArrangementAiConfig: (config: AiArrangementConfig) => void;
 }) {
   const { localeCode, resolvedLocale, t } = usePreferences();
   const [showLanguageSheet, setShowLanguageSheet] = React.useState(false);
+  const [draftConfig, setDraftConfig] = React.useState(arrangementAiConfig);
+  const [savedTip, setSavedTip] = React.useState("");
+
+  React.useEffect(() => {
+    setDraftConfig(arrangementAiConfig);
+  }, [arrangementAiConfig]);
+
+  const saveArrangementAiConfig = () => {
+    onChangeArrangementAiConfig(draftConfig);
+    setSavedTip(t("arrangements.aiConfigSaved"));
+  };
 
   return (
     <div className="relative flex h-full flex-col bg-bg">
@@ -3138,12 +4203,84 @@ function SettingsScreen({
             onClick={() => setShowLanguageSheet(true)}
           />
         </div>
+
+        <section className="mt-3 rounded-[12px] bg-surface px-3 pb-3 pt-3">
+          <h2 className="text-[15px] font-semibold leading-5 text-text">
+            {t("arrangements.aiConfigTitle")}
+          </h2>
+          <p className="mt-1 text-xs leading-4 text-text-tertiary">
+            {t("arrangements.aiConfigDesc")}
+          </p>
+          <div className="mt-3 space-y-2">
+            <SettingsTextInput
+              label={t("arrangements.baseUrl")}
+              value={draftConfig.baseUrl}
+              onChange={(value) =>
+                setDraftConfig((prev) => ({ ...prev, baseUrl: value }))
+              }
+              placeholder="https://api.openai.com/v1"
+            />
+            <SettingsTextInput
+              label={t("arrangements.apiKey")}
+              value={draftConfig.apiKey}
+              onChange={(value) =>
+                setDraftConfig((prev) => ({ ...prev, apiKey: value }))
+              }
+              placeholder="sk-..."
+            />
+            <SettingsTextInput
+              label={t("arrangements.model")}
+              value={draftConfig.model}
+              onChange={(value) =>
+                setDraftConfig((prev) => ({ ...prev, model: value }))
+              }
+              placeholder="gpt-4o-mini"
+            />
+          </div>
+          <button
+            type="button"
+            className="mt-3 h-10 w-full rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.98]"
+            onClick={saveArrangementAiConfig}
+          >
+            {t("arrangements.saveAiConfig")}
+          </button>
+          {savedTip && (
+            <p className="mt-2 text-center text-xs leading-4 text-primary">{savedTip}</p>
+          )}
+        </section>
       </div>
 
       {showLanguageSheet && (
         <LanguageSheet onClose={() => setShowLanguageSheet(false)} />
       )}
     </div>
+  );
+}
+
+function SettingsTextInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  type?: "text" | "password";
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium leading-4 text-text-tertiary">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="mt-1 h-10 w-full rounded-[10px] border border-border bg-bg px-3 text-sm text-text outline-none transition placeholder:text-text-disabled focus:border-primary"
+      />
+    </label>
   );
 }
 
@@ -3430,6 +4567,7 @@ function ThemePreview({ mode }: { mode: ResolvedTheme }) {
 
 function getTabLabel(page: PageType, t: ReturnType<typeof usePreferences>["t"]) {
   if (page === "records") return t("tabs.records");
+  if (page === "arrangements") return t("tabs.arrangements");
   if (page === "insight") return t("tabs.insight");
   return t("tabs.mine");
 }

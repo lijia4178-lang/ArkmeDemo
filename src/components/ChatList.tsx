@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
 import ChatBubble from "./ChatBubble";
 import TimeLabel from "./TimeLabel";
 import { shouldShowTimeLabel, formatMessageTimeLabel } from "@/lib/time";
@@ -13,6 +13,7 @@ type ChatListProps = {
   onOpenSourceConversation?: (source: RecordSourceConversation) => void;
   onOpenRecordDetail?: (record: RecordItem) => void;
   onOpenRecordSnapshot?: (record: RecordItem) => void;
+  renderRecordActions?: (record: RecordItem) => ReactNode;
   targetRecordUid?: string | null;
 };
 
@@ -30,6 +31,7 @@ export default function ChatList({
   onOpenSourceConversation,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
+  renderRecordActions,
   targetRecordUid,
 }: ChatListProps) {
   const { resolvedLocale, t } = usePreferences();
@@ -92,7 +94,7 @@ export default function ChatList({
 
   // 渲染消息列表（包含时间分组和交错动画）
   const renderMessages = () => {
-    const elements: React.ReactNode[] = [];
+    const elements: ReactNode[] = [];
 
     // 按时间倒序排列（最新在下面），但渲染时需要正序
     const sortedRecords = [...records].sort((a, b) => a.send_at - b.send_at);
@@ -175,6 +177,7 @@ export default function ChatList({
                 : undefined
             }
           />
+          {renderRecordActions?.(record)}
         </div>
       );
 
