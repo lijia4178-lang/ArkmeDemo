@@ -4,6 +4,13 @@ import { useCandidateProfile } from "@/data/candidateProfile";
 import { cn } from "@/lib/utils";
 import { usePreferences } from "@/settings/preferences";
 
+export type ChatBubbleMenuAction = {
+  label: string;
+  icon: "calendar" | "copy" | "detail" | "open" | "reply";
+  disabled?: boolean;
+  onClick: () => void;
+};
+
 type ChatBubbleProps = {
   textContent: string;
   /** 动画延迟类名，用于交错入场 */
@@ -25,6 +32,7 @@ type ChatBubbleProps = {
     iconLabel: string;
     onClick: () => void;
   };
+  menuActions?: ChatBubbleMenuAction[];
 };
 
 type ActionMenuPlacement = "above" | "below";
@@ -46,6 +54,7 @@ export default function ChatBubble({
   onOpenMemorySnapshot,
   reference,
   source,
+  menuActions = [],
 }: ChatBubbleProps) {
   const { t } = usePreferences();
   const candidateProfile = useCandidateProfile();
@@ -62,6 +71,7 @@ export default function ChatBubble({
   const hasText = textContent && textContent.length > 0;
   const wordCount = Array.from(textContent.trim()).length;
   const canOpenMenu = Boolean(onOpenMemorySnapshot);
+  const menuWidth = 224;
 
   const clearLongPressTimer = React.useCallback(() => {
     if (longPressTimerRef.current === null) return;
@@ -76,7 +86,6 @@ export default function ChatBubble({
     if (!card) return;
 
     const rect = card.getBoundingClientRect();
-    const menuWidth = 224;
     const menuHeight = 132;
     const arrowSize = 12;
     const arrowMargin = 18;
@@ -116,7 +125,7 @@ export default function ChatBubble({
     );
 
     setMenuPosition({ left, top, arrowLeft, placement });
-  }, []);
+  }, [menuWidth]);
 
   React.useEffect(() => {
     if (!menuOpen) return;
@@ -328,10 +337,11 @@ export default function ChatBubble({
               aria-label={t("recordAction.close")}
             />
             <div
-              className="fixed z-[9999] w-[224px]"
+              className="fixed z-[9999]"
               style={{
                 left: `${menuPosition.left}px`,
                 top: `${menuPosition.top}px`,
+                width: `${menuWidth}px`,
               }}
             >
               <span
@@ -413,6 +423,40 @@ export default function ChatBubble({
                     <path d="M6 4l4 4-4 4" />
                   </svg>
                 </button>
+                {menuActions.map((action) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    className="flex w-full items-center gap-2 border-t border-border-light px-3 py-2.5 text-left transition hover:bg-hover-overlay active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-45"
+                    onClick={() => {
+                      if (action.disabled) return;
+                      closeActionMenu();
+                      action.onClick();
+                    }}
+                    disabled={action.disabled}
+                  >
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fill-3 text-text-tertiary">
+                      <ActionMenuIcon icon={action.icon} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] leading-5 text-text">
+                        {action.label}
+                      </span>
+                    </span>
+                    <svg
+                      className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M6 4l4 4-4 4" />
+                    </svg>
+                  </button>
+                ))}
               </div>
             </div>
           </>,
@@ -421,7 +465,6 @@ export default function ChatBubble({
     </div>
   );
 }
-
 function SelfMessageAvatar({ label }: { label: string }) {
   return (
     <div
@@ -436,18 +479,22 @@ function SelfMessageAvatar({ label }: { label: string }) {
 function ActionMenuButton({
   icon,
   label,
+  disabled = false,
   onClick,
 }: {
-  icon: "copy" | "detail" | "open" | "reply";
+  icon: ChatBubbleMenuAction["icon"];
   label: string;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
-      className="flex min-w-0 flex-col items-center gap-1 rounded-[10px] px-1.5 py-2 text-[11px] leading-4 text-text-tertiary transition hover:bg-hover-overlay hover:text-text active:scale-[0.97]"
+      className="flex min-w-[48px] flex-col items-center gap-1 rounded-[10px] px-1.5 py-2 text-[11px] leading-4 text-text-tertiary transition hover:bg-hover-overlay hover:text-text active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-45"
+      disabled={disabled}
       onClick={(event) => {
         event.stopPropagation();
+        if (disabled) return;
         onClick();
       }}
     >
@@ -459,7 +506,20 @@ function ActionMenuButton({
   );
 }
 
-function ActionMenuIcon({ icon }: { icon: "copy" | "detail" | "open" | "reply" }) {
+function ActionMenuIcon({ icon }: { icon: ChatBubbleMenuAction["icon"] }) {
+  if (icon === "calendar") {
+    return (
+      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="18" height="18" rx="2" />
+        <path d="M16 2v4" />
+        <path d="M8 2v4" />
+        <path d="M3 10h18" />
+        <path d="M8 14h3" />
+        <path d="M8 18h5" />
+      </svg>
+    );
+  }
+
   if (icon === "copy") {
     return (
       <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

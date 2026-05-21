@@ -1,5 +1,5 @@
 export type ArrangementStatus = "pending" | "done" | "later";
-export type ArrangementImportance = 1 | 2 | 3;
+export type ArrangementImportance = 1 | 2 | 3 | 4 | 5;
 export type ArrangementSource = "manual" | "ai-manual-input" | "ai-message";
 
 export type ArrangementContextRef = {
@@ -20,6 +20,7 @@ export type ArrangementItem = {
   importance: ArrangementImportance;
   people: string[];
   timeText: string;
+  scheduledDate: string | null;
   scheduledAt: number | null;
   place: string;
   source: ArrangementSource;
@@ -33,6 +34,7 @@ export type AiArrangementDraft = {
   description: string;
   people: string[];
   timeText: string;
+  scheduledDate: string | null;
   scheduledAt: number | null;
   place: string;
   importance: ArrangementImportance;
@@ -48,11 +50,12 @@ export type AiArrangementConfig = {
   model: string;
 };
 
-type ArrangementDraftInput = {
+export type ArrangementDraftInput = {
   title: string;
   description: string;
   people: string[];
   timeText: string;
+  scheduledDate: string | null;
   scheduledAt: number | null;
   place: string;
   importance: ArrangementImportance;
@@ -65,6 +68,7 @@ export const arrangementAiConfigStorageKey = "arkme-demo.arrangementAiConfig.v1"
 
 const defaultAiBaseUrl = "https://api.openai.com/v1";
 const defaultAiModel = "gpt-4o-mini";
+const aiRecognitionTimeoutMs = 12000;
 
 function readJsonValue(key: string): unknown {
   if (typeof window === "undefined") return null;
@@ -108,9 +112,106 @@ function normalizeOptionalTimestamp(value: unknown): number | null {
   return null;
 }
 
+function dateStringFromTimestamp(value: number | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (item: number) => String(item).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}`;
+}
+
+function normalizeDateString(value: unknown) {
+  const text = normalizeText(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const parsedValue = Date.parse(`${text}T00:00:00`);
+  return Number.isFinite(parsedValue) ? text : null;
+}
+
+const chineseHourMap: Record<string, number> = {
+  零: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+  十: 10,
+  十一: 11,
+  十二: 12,
+};
+
+function normalizeHour(value: string) {
+  const numericValue = Number(value);
+  if (Number.isFinite(numericValue)) return numericValue;
+  return chineseHourMap[value] ?? null;
+}
+
+function timestampFromDateAndTime(dateValue: string, hour: number, minute: number) {
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  const parsedValue = Date.parse(
+    `${dateValue}T${String(hour).padStart(2, "0")}:${String(minute).padStart(
+      2,
+      "0"
+    )}:00`
+  );
+  return Number.isFinite(parsedValue) ? parsedValue : null;
+}
+
+function inferScheduledAtFromText(dateValue: string | null, text: string) {
+  if (!dateValue || !text) return null;
+
+  const colonMatch = text.match(/(?:^|[^\d])([01]?\d|2[0-3])[:：]([0-5]\d)/);
+  if (colonMatch) {
+    return timestampFromDateAndTime(
+      dateValue,
+      Number(colonMatch[1]),
+      Number(colonMatch[2])
+    );
+  }
+
+  const hourMatch = text.match(
+    /(凌晨|早上|上午|中午|下午|晚上|晚间)?\s*(\d{1,2}|十[一二]?|十二|十一|十|[一二两三四五六七八九])\s*[点時时](?:\s*([0-5]?\d|半|一刻|三刻)\s*分?)?/
+  );
+  if (!hourMatch) return null;
+
+  let hour = normalizeHour(hourMatch[2]);
+  if (hour === null) return null;
+
+  const period = hourMatch[1] ?? "";
+  if ((period === "下午" || period === "晚上" || period === "晚间") && hour < 12) {
+    hour += 12;
+  } else if (period === "中午" && hour < 11) {
+    hour += 12;
+  } else if (period === "凌晨" && hour === 12) {
+    hour = 0;
+  }
+
+  const minuteText = hourMatch[3] ?? "";
+  const minute =
+    minuteText === "半"
+      ? 30
+      : minuteText === "一刻"
+        ? 15
+        : minuteText === "三刻"
+          ? 45
+          : minuteText
+            ? Number(minuteText)
+            : 0;
+
+  return timestampFromDateAndTime(dateValue, hour, minute);
+}
+
 function normalizeImportance(value: unknown): ArrangementImportance {
-  if (value === 3 || value === "3" || value === "high") return 3;
-  if (value === 2 || value === "2" || value === "medium") return 2;
+  if (value === 5 || value === "5" || value === "highest") return 5;
+  if (value === 4 || value === "4" || value === "high") return 4;
+  if (value === 3 || value === "3" || value === "medium") return 3;
+  if (value === 2 || value === "2" || value === "low") return 2;
   return 1;
 }
 
@@ -158,6 +259,9 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
     item.source === "ai-manual-input" || item.source === "ai-message"
       ? item.source
       : "manual";
+  const scheduledAt = normalizeOptionalTimestamp(item.scheduledAt);
+  const scheduledDate =
+    normalizeDateString(item.scheduledDate) || dateStringFromTimestamp(scheduledAt);
 
   return {
     id: normalizeText(item.id) || `arrangement-${now}`,
@@ -167,7 +271,8 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
     importance: normalizeImportance(item.importance),
     people: normalizePeople(item.people),
     timeText: normalizeText(item.timeText),
-    scheduledAt: normalizeOptionalTimestamp(item.scheduledAt),
+    scheduledDate,
+    scheduledAt,
     place: normalizeText(item.place),
     source,
     contextRefs: Array.isArray(item.contextRefs)
@@ -199,6 +304,7 @@ export function getInitialArrangements(): ArrangementItem[] {
         importance: 3,
         people: ["爸爸", "姐姐"],
         timeText: "后天上午",
+        scheduledDate: dateStringFromTimestamp(hospitalTime.getTime()),
         scheduledAt: hospitalTime.getTime(),
         place: "医院",
         source: "manual",
@@ -214,6 +320,7 @@ export function getInitialArrangements(): ArrangementItem[] {
         importance: 2,
         people: ["面试官"],
         timeText: "明天早上",
+        scheduledDate: dateStringFromTimestamp(breakfastTime.getTime()),
         scheduledAt: breakfastTime.getTime(),
         place: "公司",
         source: "manual",
@@ -286,13 +393,22 @@ function normalizeAiDraft(
   if (!title) {
     throw new Error("识别失败，非安排相关内容");
   }
+  const scheduledAt = normalizeOptionalTimestamp(draft.scheduledAt);
+  const scheduledDate =
+    normalizeDateString(draft.scheduledDate) || dateStringFromTimestamp(scheduledAt);
+  const description = normalizeText(draft.description);
+  const timeText = normalizeText(draft.timeText);
+  const inferredScheduledAt =
+    scheduledAt ??
+    inferScheduledAtFromText(scheduledDate, `${timeText}\n${title}\n${description}`);
 
   return {
     title,
-    description: normalizeText(draft.description),
+    description,
     people: normalizePeople(draft.people),
-    timeText: normalizeText(draft.timeText),
-    scheduledAt: normalizeOptionalTimestamp(draft.scheduledAt),
+    timeText,
+    scheduledDate,
+    scheduledAt: inferredScheduledAt,
     place: normalizeText(draft.place),
     importance: normalizeImportance(draft.importance),
     confidence:
@@ -315,6 +431,74 @@ async function readAiErrorMessage(response: Response) {
   } catch {
     return "";
   }
+}
+
+async function readStreamingAiContent(response: Response) {
+  if (!response.body) {
+    throw new Error("AI 未返回可读取的流式内容");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+
+  let streamDone = false;
+  while (!streamDone) {
+    const { done, value } = await reader.read();
+    streamDone = done;
+    if (!value) continue;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      if (!trimmedLine.startsWith("data:")) continue;
+
+      const data = trimmedLine.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+
+      try {
+        const chunk = JSON.parse(data) as {
+          choices?: Array<{
+            delta?: { content?: string };
+            message?: { content?: string };
+          }>;
+        };
+        content +=
+          chunk.choices?.[0]?.delta?.content ??
+          chunk.choices?.[0]?.message?.content ??
+          "";
+      } catch {
+        // Ignore malformed keep-alive chunks from OpenAI-compatible gateways.
+      }
+    }
+  }
+
+  const tail = buffer.trim();
+  if (tail.startsWith("data:")) {
+    const data = tail.slice(5).trim();
+    if (data && data !== "[DONE]") {
+      try {
+        const chunk = JSON.parse(data) as {
+          choices?: Array<{
+            delta?: { content?: string };
+            message?: { content?: string };
+          }>;
+        };
+        content +=
+          chunk.choices?.[0]?.delta?.content ??
+          chunk.choices?.[0]?.message?.content ??
+          "";
+      } catch {
+        // Ignore malformed final chunks.
+      }
+    }
+  }
+
+  return content.trim();
 }
 
 function getAiHttpErrorMessage(status: number, detail: string) {
@@ -348,39 +532,54 @@ export async function recognizeArrangement(
     throw new Error("请先在设置中填写 AI Base URL、API Key 和模型名");
   }
 
-  const response = await fetch(buildChatCompletionsUrl(config.baseUrl), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey.trim()}`,
-    },
-    body: JSON.stringify({
-      model: config.model.trim(),
-      temperature: 1,
-      messages: [
-        {
-          role: "system",
-          content:
-            "你是即我 app 的安排识别助手。请从用户文本或聊天消息中识别一个未来需要执行、关注或确认的安排。必须根据输入里的消息发送时间或当前时间解析相对日期。若用户只说明天、后天或某一天但没有具体时刻，使用参考时间的时分秒落到目标日期。只返回 JSON，不要解释。",
-        },
-        {
-          role: "user",
-          content: `请把下面内容拆解为安排 JSON，字段必须包含 title, description, people, timeText, scheduledAt, place, importance, confidence, reason。scheduledAt 必须是毫秒时间戳；如果完全无法判断明确日期时间，返回 null。importance 只能是 1、2、3，3 最重要。内容：\n${normalizedContent}`,
-        },
-      ],
-      response_format: { type: "json_object" },
-    }),
-  });
+  const abortController = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    abortController.abort();
+  }, aiRecognitionTimeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(buildChatCompletionsUrl(config.baseUrl), {
+      method: "POST",
+      signal: abortController.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.apiKey.trim()}`,
+      },
+      body: JSON.stringify({
+        model: config.model.trim(),
+        temperature: 1,
+        max_tokens: 260,
+        stream: true,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是安排识别器。只返回紧凑 JSON。识别未来需要执行/关注/确认的安排；无安排则 title 为空。相对日期按输入参考时间解析为 YYYY-MM-DD 的 scheduledDate。只有明确时刻如 09:00、上午九点、下午3点才返回毫秒 scheduledAt；仅明天/后天/上午/下午不虚构时刻，scheduledAt 返回 null。",
+          },
+          {
+            role: "user",
+            content: `输出字段：title, description, people, timeText, scheduledDate, scheduledAt, place, importance。importance 只能是 1、2、3、4、5，5 最重要。内容：\n${normalizedContent}`,
+          },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("AI 识别超时，请稍后重试或切换更快的模型");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const detail = await readAiErrorMessage(response);
     throw new Error(getAiHttpErrorMessage(response.status, detail));
   }
 
-  const payload = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const contentText = payload.choices?.[0]?.message?.content;
+  const contentText = await readStreamingAiContent(response);
   if (!contentText) {
     throw new Error("AI 未返回可解析内容");
   }
@@ -410,6 +609,7 @@ export function createArrangementFromDraft(
     importance: draft.importance,
     people: draft.people,
     timeText: draft.timeText.trim(),
+    scheduledDate: draft.scheduledDate,
     scheduledAt: draft.scheduledAt,
     place: draft.place.trim(),
     source: draft.source,

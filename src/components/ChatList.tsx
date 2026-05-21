@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
-import ChatBubble from "./ChatBubble";
+import ChatBubble, { type ChatBubbleMenuAction } from "./ChatBubble";
 import TimeLabel from "./TimeLabel";
 import { shouldShowTimeLabel, formatMessageTimeLabel } from "@/lib/time";
 import { usePreferences } from "@/settings/preferences";
@@ -14,6 +14,7 @@ type ChatListProps = {
   onOpenRecordDetail?: (record: RecordItem) => void;
   onOpenRecordSnapshot?: (record: RecordItem) => void;
   renderRecordActions?: (record: RecordItem) => ReactNode;
+  getRecordMenuActions?: (record: RecordItem) => ChatBubbleMenuAction[];
   targetRecordUid?: string | null;
 };
 
@@ -32,6 +33,7 @@ export default function ChatList({
   onOpenRecordDetail,
   onOpenRecordSnapshot,
   renderRecordActions,
+  getRecordMenuActions,
   targetRecordUid,
 }: ChatListProps) {
   const { resolvedLocale, t } = usePreferences();
@@ -176,6 +178,7 @@ export default function ChatList({
                   }
                 : undefined
             }
+            menuActions={getRecordMenuActions?.(record)}
           />
           {renderRecordActions?.(record)}
         </div>

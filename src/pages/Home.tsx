@@ -16,6 +16,7 @@ import {
   type AiArrangementConfig,
   type AiArrangementDraft,
   type ArrangementContextRef,
+  type ArrangementDraftInput,
   type ArrangementImportance,
   type ArrangementItem,
   type ArrangementStatus,
@@ -343,7 +344,7 @@ function shouldRequestBrowserNotificationPermission() {
 }
 
 export default function Home({ currentPage, onNavigate }: HomeProps) {
-  const { t } = usePreferences();
+  const { resolvedLocale, t } = usePreferences();
   const candidateProfile = useCandidateProfile();
   const [showSearch, setShowSearch] = React.useState(false);
   const [showMenu, setShowMenu] = React.useState(false);
@@ -378,10 +379,16 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const [testReadState, setTestReadState] =
     React.useState<TestReadState>(getInitialTestReadState);
   const [arrangements, setArrangements] = React.useState(getInitialArrangements);
+  const [currentTime, setCurrentTime] = React.useState(() => Date.now());
+  const [arrangementToOpenId, setArrangementToOpenId] = React.useState<string | null>(
+    null
+  );
   const [arrangementAiConfig, setArrangementAiConfig] = React.useState(
     getInitialAiArrangementConfig
   );
   const [selfArrangementDraft, setSelfArrangementDraft] =
+    React.useState<AiArrangementDraft | null>(null);
+  const [editingSelfArrangementDraft, setEditingSelfArrangementDraft] =
     React.useState<AiArrangementDraft | null>(null);
   const [selfArrangementMessage, setSelfArrangementMessage] = React.useState("");
   const [recognizingSelfArrangementUid, setRecognizingSelfArrangementUid] =
@@ -423,6 +430,11 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       window.removeEventListener("storage", handleStorage);
       window.removeEventListener(testConversationStorageEvent, refreshTestConversations);
     };
+  }, []);
+
+  React.useEffect(() => {
+    const intervalId = window.setInterval(() => setCurrentTime(Date.now()), 30000);
+    return () => window.clearInterval(intervalId);
   }, []);
 
   const markAiConversationAsRead = React.useCallback(() => {
@@ -829,6 +841,48 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     persistAiArrangementConfig(nextConfig);
   }, []);
 
+  const dueArrangement = React.useMemo(() => {
+    const todayStart = getDayStart(new Date(currentTime));
+    return sortArrangementsByStatusImportanceDate(
+      arrangements.filter((arrangement) => {
+        if (arrangement.status !== "pending") return false;
+        if (arrangement.scheduledAt) return arrangement.scheduledAt <= currentTime;
+        if (!arrangement.scheduledDate) return false;
+        const scheduledStart = getArrangementSortDate(arrangement);
+        return Number.isFinite(scheduledStart) && scheduledStart <= todayStart;
+      })
+    )[0];
+  }, [arrangements, currentTime]);
+
+  const updateArrangementStatus = React.useCallback(
+    (arrangement: ArrangementItem, status: ArrangementStatus) => {
+      updateArrangements((prev) =>
+        prev.map((item) =>
+          item.id === arrangement.id
+            ? { ...item, status, updatedAt: Date.now() }
+            : item
+        )
+      );
+    },
+    [updateArrangements]
+  );
+
+  const openDueArrangement = React.useCallback(
+    (arrangement: ArrangementItem) => {
+      setRecordDetail(null);
+      setRecordSnapshot(null);
+      setShowSearch(false);
+      setShowAiConversation(false);
+      setShowSendToSelf(false);
+      setShowTestConversation(false);
+      setShowAnswerGuide(false);
+      setSettingsView(null);
+      setArrangementToOpenId(arrangement.id);
+      onNavigate("arrangements");
+    },
+    [onNavigate]
+  );
+
   const makeSelfArrangementContextRef = React.useCallback(
     (record: RecordItem): ArrangementContextRef => ({
       conversationId: "self",
@@ -895,7 +949,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
   const confirmSelfArrangementDraft = React.useCallback(() => {
     if (!selfArrangementDraft) return;
-    if (!selfArrangementDraft.scheduledAt) {
+    if (!selfArrangementDraft.scheduledDate) {
       setSelfArrangementMessage(t("arrangements.timeRequired"));
       return;
     }
@@ -906,6 +960,20 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     setSelfArrangementDraft(null);
     setSelfArrangementMessage(t("arrangements.confirmed"));
   }, [selfArrangementDraft, t, updateArrangements]);
+
+  const saveEditingSelfArrangementDraft = React.useCallback(
+    (nextDraft: ArrangementDraftInput) => {
+      if (!editingSelfArrangementDraft) return;
+      setSelfArrangementDraft({
+        ...editingSelfArrangementDraft,
+        ...nextDraft,
+        source: editingSelfArrangementDraft.source,
+      });
+      setEditingSelfArrangementDraft(null);
+      setSelfArrangementMessage("");
+    },
+    [editingSelfArrangementDraft]
+  );
 
   const cancelSelfArrangementDraft = React.useCallback(() => {
     setSelfArrangementDraft(null);
@@ -1268,6 +1336,17 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       );
     }
 
+    if (editingSelfArrangementDraft) {
+      return (
+        <ArrangementDraftEditScreen
+          title={t("arrangements.editTitle")}
+          initialDraft={editingSelfArrangementDraft}
+          onBack={() => setEditingSelfArrangementDraft(null)}
+          onSave={saveEditingSelfArrangementDraft}
+        />
+      );
+    }
+
     if (showSendToSelf) {
       return (
         <SendToSelfConversationChat
@@ -1285,6 +1364,9 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           }}
           onConfirmArrangement={confirmSelfArrangementDraft}
           onCancelArrangement={cancelSelfArrangementDraft}
+          onEditArrangement={() => {
+            if (selfArrangementDraft) setEditingSelfArrangementDraft(selfArrangementDraft);
+          }}
         />
       );
     }
@@ -1341,6 +1423,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           arrangements={arrangements}
           aiConfig={arrangementAiConfig}
           contextRefs={arrangementContextRefs}
+          openArrangementId={arrangementToOpenId}
+          onOpenedArrangement={() => setArrangementToOpenId(null)}
           onAddArrangement={(arrangement) =>
             updateArrangements((prev) => [arrangement, ...prev])
           }
@@ -1398,6 +1482,19 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       mainPane={
         <div className="relative flex min-h-0 flex-1 flex-col">
           <main className="min-h-0 flex-1 overflow-hidden">{renderMainContent()}</main>
+          {dueArrangement && (
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex max-h-[50%] justify-center px-4 pt-4">
+              <div className="pointer-events-auto w-full max-w-[520px]">
+                <DueArrangementBanner
+                  arrangement={dueArrangement}
+                  locale={resolvedLocale}
+                  onOpen={() => openDueArrangement(dueArrangement)}
+                  onMoveLater={() => updateArrangementStatus(dueArrangement, "later")}
+                  onDone={() => updateArrangementStatus(dueArrangement, "done")}
+                />
+              </div>
+            </div>
+          )}
           {!recordDetail && !showSearch && !showAnswerGuide && !showAiConversation && !showSendToSelf && !showTestConversation && !settingsView && (
             <MobileBottomNavigation currentPage={currentPage} onNavigate={onNavigate} />
           )}
@@ -2510,6 +2607,7 @@ function SendToSelfConversationChat({
   onRecognizeRecord,
   onConfirmArrangement,
   onCancelArrangement,
+  onEditArrangement,
 }: {
   records: RecordItem[];
   targetUid?: string | null;
@@ -2523,6 +2621,7 @@ function SendToSelfConversationChat({
   onRecognizeRecord: (record: RecordItem) => void;
   onConfirmArrangement: () => void;
   onCancelArrangement: () => void;
+  onEditArrangement: () => void;
 }) {
   const { t } = usePreferences();
   const recordsWithoutSource = React.useMemo(
@@ -2567,22 +2666,18 @@ function SendToSelfConversationChat({
         targetRecordUid={targetUid}
         onOpenRecordDetail={onOpenRecordDetail}
         onOpenRecordSnapshot={onOpenRecordSnapshot}
-        renderRecordActions={(record) => {
+        getRecordMenuActions={(record) => {
           const isRecognizing = recognizingArrangementUid === record.uid;
-          return (
-            <div className="mt-1 flex justify-end px-4 pb-1">
-              <button
-                type="button"
-                className="rounded-full border border-border bg-surface px-2.5 py-1 text-[11px] font-medium leading-4 text-text-tertiary transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => onRecognizeRecord(record)}
-                disabled={Boolean(recognizingArrangementUid)}
-              >
-                {isRecognizing
-                  ? t("arrangements.recognizing")
-                  : t("arrangements.recognizeSelf")}
-              </button>
-            </div>
-          );
+          return [
+            {
+              label: isRecognizing
+                ? t("arrangements.recognizing")
+                : t("arrangements.recognizeSelf"),
+              icon: "calendar",
+              disabled: Boolean(recognizingArrangementUid),
+              onClick: () => onRecognizeRecord(record),
+            },
+          ];
         }}
       />
       {(pendingArrangementDraft || arrangementMessage) && (
@@ -2592,7 +2687,8 @@ function SendToSelfConversationChat({
               draft={pendingArrangementDraft}
               onConfirm={onConfirmArrangement}
               onCancel={onCancelArrangement}
-              canConfirm={Boolean(pendingArrangementDraft.scheduledAt)}
+              onEdit={onEditArrangement}
+              canConfirm={Boolean(pendingArrangementDraft.scheduledDate)}
             />
           )}
           {arrangementMessage && (
@@ -2946,6 +3042,8 @@ function ArrangementsScreen({
   arrangements,
   aiConfig,
   contextRefs,
+  openArrangementId,
+  onOpenedArrangement,
   onAddArrangement,
   onUpdateArrangement,
   onOpenContext,
@@ -2953,6 +3051,8 @@ function ArrangementsScreen({
   arrangements: ArrangementItem[];
   aiConfig: AiArrangementConfig;
   contextRefs: ArrangementContextRef[];
+  openArrangementId?: string | null;
+  onOpenedArrangement?: () => void;
   onAddArrangement: (arrangement: ArrangementItem) => void;
   onUpdateArrangement: (arrangement: ArrangementItem) => void;
   onOpenContext: (ref: ArrangementContextRef) => void;
@@ -2963,57 +3063,115 @@ function ArrangementsScreen({
   const [placeFilter, setPlaceFilter] = React.useState("all");
   const [selectedArrangement, setSelectedArrangement] =
     React.useState<ArrangementItem | null>(null);
+  const [showPendingBox, setShowPendingBox] = React.useState(false);
   const [showCreateArrangement, setShowCreateArrangement] = React.useState(false);
   const [naturalInput, setNaturalInput] = React.useState("");
   const [manualTitle, setManualTitle] = React.useState("");
   const [manualDescription, setManualDescription] = React.useState("");
   const [manualPeople, setManualPeople] = React.useState("");
   const [manualTime, setManualTime] = React.useState("");
-  const [manualScheduledAt, setManualScheduledAt] = React.useState("");
+  const [manualScheduledDate, setManualScheduledDate] = React.useState("");
+  const [manualScheduledTime, setManualScheduledTime] = React.useState("");
   const [manualPlace, setManualPlace] = React.useState("");
   const [manualImportance, setManualImportance] =
     React.useState<ArrangementImportance>(2);
   const [pendingDraft, setPendingDraft] = React.useState<AiArrangementDraft | null>(
     null
   );
+  const [editingPendingDraft, setEditingPendingDraft] =
+    React.useState<AiArrangementDraft | null>(null);
   const [recognitionMessage, setRecognitionMessage] = React.useState("");
   const [isRecognizing, setIsRecognizing] = React.useState(false);
+  const [currentTime, setCurrentTime] = React.useState(() => Date.now());
+
+  React.useEffect(() => {
+    const intervalId = window.setInterval(() => setCurrentTime(Date.now()), 30000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  React.useEffect(() => {
+    if (!openArrangementId) return;
+    const arrangement = arrangements.find((item) => item.id === openArrangementId);
+    if (!arrangement) {
+      onOpenedArrangement?.();
+      return;
+    }
+    setShowPendingBox(false);
+    setShowCreateArrangement(false);
+    setEditingPendingDraft(null);
+    setSelectedArrangement(arrangement);
+    onOpenedArrangement?.();
+  }, [arrangements, onOpenedArrangement, openArrangementId]);
+
+  const pendingBoxArrangements = React.useMemo(
+    () => arrangements.filter((arrangement) => arrangement.status === "later"),
+    [arrangements]
+  );
+
+  const activeArrangements = React.useMemo(
+    () => arrangements.filter((arrangement) => arrangement.status !== "later"),
+    [arrangements]
+  );
 
   const filterOptions = React.useMemo(() => {
     const people = new Set<string>();
-    const times = new Set<string>();
     const places = new Set<string>();
-    arrangements.forEach((arrangement) => {
+    activeArrangements.forEach((arrangement) => {
       arrangement.people.forEach((person) => people.add(person));
-      times.add(formatArrangementTime(arrangement, t, resolvedLocale));
       if (arrangement.place) places.add(arrangement.place);
     });
     return {
       people: Array.from(people),
-      times: Array.from(times),
       places: Array.from(places),
     };
-  }, [arrangements, resolvedLocale, t]);
+  }, [activeArrangements]);
+
+  const calendarDates = React.useMemo(
+    () => getCurrentMonthDateOptions(currentTime),
+    [currentTime]
+  );
+
+  const arrangementCountByDate = React.useMemo(() => {
+    const countByDate = new Map<string, number>();
+    activeArrangements.forEach((arrangement) => {
+      const dateValue = getArrangementDateValue(arrangement);
+      if (!dateValue) return;
+      countByDate.set(dateValue, (countByDate.get(dateValue) ?? 0) + 1);
+    });
+    return countByDate;
+  }, [activeArrangements]);
+
+  React.useEffect(() => {
+    if (timeFilter === "all") return;
+    if (calendarDates.some((date) => date.value === timeFilter)) return;
+    setTimeFilter("all");
+  }, [calendarDates, timeFilter]);
 
   const sortedArrangements = React.useMemo(
     () =>
-      [...arrangements]
+      sortArrangementsByStatusImportanceDate(
+        activeArrangements
         .filter((arrangement) => {
           const matchesPeople =
             peopleFilter === "all" || arrangement.people.includes(peopleFilter);
           const matchesTime =
             timeFilter === "all" ||
-            formatArrangementTime(arrangement, t, resolvedLocale) === timeFilter;
+            getArrangementDateValue(arrangement) === timeFilter;
           const matchesPlace = placeFilter === "all" || arrangement.place === placeFilter;
           return matchesPeople && matchesTime && matchesPlace;
         })
-        .sort((left, right) => {
-          if (right.importance !== left.importance) {
-            return right.importance - left.importance;
-          }
-          return right.updatedAt - left.updatedAt;
-        }),
-    [arrangements, peopleFilter, placeFilter, resolvedLocale, t, timeFilter]
+      ),
+    [
+      activeArrangements,
+      peopleFilter,
+      placeFilter,
+      timeFilter,
+    ]
+  );
+
+  const sortedPendingBoxArrangements = React.useMemo(
+    () => sortArrangementsByStatusImportanceDate(pendingBoxArrangements),
+    [pendingBoxArrangements]
   );
 
   const resetManualForm = () => {
@@ -3021,7 +3179,8 @@ function ArrangementsScreen({
     setManualDescription("");
     setManualPeople("");
     setManualTime("");
-    setManualScheduledAt("");
+    setManualScheduledDate("");
+    setManualScheduledTime("");
     setManualPlace("");
     setManualImportance(2);
   };
@@ -3031,7 +3190,8 @@ function ArrangementsScreen({
     setManualDescription(draft.description);
     setManualPeople(draft.people.join("、"));
     setManualTime(draft.timeText);
-    setManualScheduledAt(formatDateTimeLocalInput(draft.scheduledAt));
+    setManualScheduledDate(draft.scheduledDate ?? "");
+    setManualScheduledTime(formatTimeInput(draft.scheduledAt));
     setManualPlace(draft.place);
     setManualImportance(draft.importance);
   };
@@ -3098,7 +3258,7 @@ function ArrangementsScreen({
 
   const confirmDraft = () => {
     if (!pendingDraft) return;
-    if (!pendingDraft.scheduledAt) {
+    if (!pendingDraft.scheduledDate) {
       setRecognitionMessage(t("arrangements.timeRequired"));
       return;
     }
@@ -3107,6 +3267,19 @@ function ArrangementsScreen({
     setNaturalInput("");
     setRecognitionMessage(t("arrangements.confirmed"));
     setShowCreateArrangement(false);
+  };
+
+  const saveEditingPendingDraft = (nextDraft: ArrangementDraftInput) => {
+    if (!editingPendingDraft) return;
+    const updatedDraft = {
+      ...editingPendingDraft,
+      ...nextDraft,
+      source: editingPendingDraft.source,
+    };
+    setPendingDraft(updatedDraft);
+    fillFormFromDraft(updatedDraft);
+    setEditingPendingDraft(null);
+    setRecognitionMessage("");
   };
 
   const cancelDraft = () => {
@@ -3120,11 +3293,12 @@ function ArrangementsScreen({
       setRecognitionMessage(t("arrangements.titleRequired"));
       return;
     }
-    const scheduledAt = parseDateTimeLocalInput(manualScheduledAt);
-    if (!scheduledAt) {
+    const scheduledDate = parseDateInput(manualScheduledDate);
+    if (!scheduledDate) {
       setRecognitionMessage(t("arrangements.timeRequired"));
       return;
     }
+    const scheduledAt = combineDateAndTime(scheduledDate, manualScheduledTime);
 
     onAddArrangement(
       createArrangementFromDraft({
@@ -3132,6 +3306,7 @@ function ArrangementsScreen({
         description: manualDescription,
         people: splitInlineList(manualPeople),
         timeText: manualTime,
+        scheduledDate,
         scheduledAt,
         place: manualPlace,
         importance: manualImportance,
@@ -3159,6 +3334,51 @@ function ArrangementsScreen({
         onUpdateArrangement={updateSelectedArrangement}
         onOpenContext={onOpenContext}
       />
+    );
+  }
+
+  if (editingPendingDraft) {
+    return (
+      <ArrangementDraftEditScreen
+        title={t("arrangements.editTitle")}
+        initialDraft={editingPendingDraft}
+        onBack={() => setEditingPendingDraft(null)}
+        onSave={saveEditingPendingDraft}
+      />
+    );
+  }
+
+  if (showPendingBox) {
+    return (
+      <div className="flex h-full flex-col bg-bg">
+        <MobilePageHeader
+          title={t("arrangements.pendingBox")}
+          onBack={() => setShowPendingBox(false)}
+        />
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-3">
+          <section className="space-y-3">
+            {sortedPendingBoxArrangements.length > 0 ? (
+              sortedPendingBoxArrangements.map((arrangement) => (
+                <ArrangementCard
+                  key={arrangement.id}
+                  arrangement={arrangement}
+                  locale={resolvedLocale}
+                  onClick={() => setSelectedArrangement(arrangement)}
+                />
+              ))
+            ) : (
+              <div className="rounded-[14px] bg-surface px-4 py-8 text-center">
+                <p className="text-sm font-semibold text-text">
+                  {t("arrangements.pendingBoxEmptyTitle")}
+                </p>
+                <p className="mt-1 text-xs text-text-tertiary">
+                  {t("arrangements.pendingBoxEmptyDesc")}
+                </p>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
     );
   }
 
@@ -3231,10 +3451,16 @@ function ArrangementsScreen({
                 onChange={setManualTime}
               />
               <FormInput
-                label={t("arrangements.fieldScheduledAt")}
-                value={manualScheduledAt}
-                onChange={setManualScheduledAt}
-                type="datetime-local"
+                label={t("arrangements.fieldScheduledDate")}
+                value={manualScheduledDate}
+                onChange={setManualScheduledDate}
+                type="date"
+              />
+              <FormInput
+                label={t("arrangements.fieldScheduledTime")}
+                value={manualScheduledTime}
+                onChange={setManualScheduledTime}
+                type="time"
               />
               <FormInput
                 label={t("arrangements.fieldPlace")}
@@ -3256,7 +3482,7 @@ function ArrangementsScreen({
               <span className="text-xs text-text-tertiary">
                 {t("arrangements.importance")}
               </span>
-              {[1, 2, 3].map((level) => (
+              {([1, 2, 3, 4, 5] as ArrangementImportance[]).map((level) => (
                 <button
                   key={level}
                   type="button"
@@ -3277,7 +3503,8 @@ function ArrangementsScreen({
                 draft={pendingDraft}
                 onConfirm={confirmDraft}
                 onCancel={cancelDraft}
-                canConfirm={Boolean(pendingDraft.scheduledAt)}
+                onEdit={() => setEditingPendingDraft(pendingDraft)}
+                canConfirm={Boolean(pendingDraft.scheduledDate)}
               />
             )}
             {recognitionMessage && (
@@ -3296,9 +3523,18 @@ function ArrangementsScreen({
       <header className="shrink-0 bg-bg px-4 pb-2 pt-4">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-[22px] font-bold leading-7 text-text">
-              {t("arrangements.title")}
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-[22px] font-bold leading-7 text-text">
+                {t("arrangements.title")}
+              </h1>
+              <button
+                type="button"
+                className="h-7 rounded-full border border-border bg-surface px-2.5 text-[11px] font-semibold text-text transition active:scale-[0.98]"
+                onClick={() => setShowPendingBox(true)}
+              >
+                {t("arrangements.pendingBox")} {pendingBoxArrangements.length}
+              </button>
+            </div>
             <p className="mt-1 text-xs leading-4 text-text-tertiary">
               {t("arrangements.subtitle")}
             </p>
@@ -3311,18 +3547,12 @@ function ArrangementsScreen({
             {t("arrangements.add")}
           </button>
         </div>
-        <div className="mt-3 grid grid-cols-3 gap-2">
+        <div className="mt-3 grid grid-cols-2 gap-2">
           <FilterSelect
             label={t("arrangements.filterPeople")}
             value={peopleFilter}
             options={filterOptions.people}
             onChange={setPeopleFilter}
-          />
-          <FilterSelect
-            label={t("arrangements.filterTime")}
-            value={timeFilter}
-            options={filterOptions.times}
-            onChange={setTimeFilter}
           />
           <FilterSelect
             label={t("arrangements.filterPlace")}
@@ -3331,6 +3561,12 @@ function ArrangementsScreen({
             onChange={setPlaceFilter}
           />
         </div>
+        <CalendarDateFilter
+          dates={calendarDates}
+          countByDate={arrangementCountByDate}
+          value={timeFilter}
+          onChange={setTimeFilter}
+        />
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">
@@ -3381,7 +3617,7 @@ function FilterSelect({
         className="h-9 w-full rounded-[10px] border border-border bg-surface px-2 text-xs font-medium text-text outline-none"
       >
         <option value="all">
-          {label} 路 {t("arrangements.all")}
+          {label} · {t("arrangements.all")}
         </option>
         {options.map((option) => (
           <option key={option} value={option}>
@@ -3391,6 +3627,85 @@ function FilterSelect({
       </select>
     </label>
   );
+}
+
+type CalendarDateOption = {
+  value: string;
+  day: number;
+  weekday: string;
+  isToday: boolean;
+};
+
+function CalendarDateFilter({
+  dates,
+  countByDate,
+  value,
+  onChange,
+}: {
+  dates: CalendarDateOption[];
+  countByDate: Map<string, number>;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { resolvedLocale, t } = usePreferences();
+  return (
+    <section aria-label={t("arrangements.filterTime")} className="mt-3">
+      <div className="flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <button
+          type="button"
+          className={cn(
+            "flex h-12 min-w-[54px] shrink-0 flex-col items-center justify-center rounded-[12px] border px-2 text-xs font-semibold transition active:scale-[0.98]",
+            value === "all"
+              ? "border-primary bg-primary text-on-primary"
+              : "border-border bg-surface text-text"
+          )}
+          onClick={() => onChange("all")}
+        >
+          {t("arrangements.all")}
+        </button>
+        {dates.map((date) => {
+          const count = countByDate.get(date.value) ?? 0;
+          const selected = value === date.value;
+          return (
+            <button
+              key={date.value}
+              type="button"
+              className={cn(
+                "flex h-12 min-w-[46px] shrink-0 flex-col items-center justify-center rounded-[12px] border px-2 text-xs transition active:scale-[0.98]",
+                getCalendarHeatClass(count),
+                date.isToday && "border-primary text-primary",
+                selected && "border-primary bg-primary text-on-primary"
+              )}
+              onClick={() => onChange(date.value)}
+              aria-label={`${date.value} ${count}`}
+            >
+              <span className="text-[11px] leading-3 opacity-80">
+                {new Intl.DateTimeFormat(resolvedLocale, {
+                  weekday: "narrow",
+                }).format(new Date(`${date.value}T00:00:00`)) || date.weekday}
+              </span>
+              <span className="mt-0.5 text-[15px] font-semibold leading-4">
+                {date.day}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function getCalendarHeatClass(count: number) {
+  if (count >= 4) {
+    return "border-primary/50 bg-primary text-on-primary";
+  }
+  if (count >= 2) {
+    return "border-primary/35 bg-primary-soft text-primary";
+  }
+  if (count === 1) {
+    return "border-primary/20 bg-primary-soft/60 text-text";
+  }
+  return "border-border bg-surface text-text-tertiary";
 }
 
 function FormInput({
@@ -3417,6 +3732,131 @@ function FormInput({
   );
 }
 
+function DueArrangementBanner({
+  arrangement,
+  locale,
+  onOpen,
+  onMoveLater,
+  onDone,
+}: {
+  arrangement: ArrangementItem;
+  locale: string;
+  onOpen: () => void;
+  onMoveLater: () => void;
+  onDone: () => void;
+}) {
+  const { t } = usePreferences();
+  const [dragX, setDragX] = React.useState(0);
+  const startXRef = React.useRef<number | null>(null);
+  const trackRef = React.useRef<HTMLDivElement | null>(null);
+  const maxDragRef = React.useRef(96);
+  const handleSize = 40;
+
+  const resetDrag = () => {
+    startXRef.current = null;
+    setDragX(0);
+  };
+
+  const getMaxDrag = () => {
+    const trackWidth = trackRef.current?.getBoundingClientRect().width ?? 0;
+    const nextMaxDrag = Math.max(96, trackWidth / 2 - handleSize / 2 - 8);
+    maxDragRef.current = nextMaxDrag;
+    return nextMaxDrag;
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    getMaxDrag();
+    startXRef.current = event.clientX;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (startXRef.current === null) return;
+    event.stopPropagation();
+    const maxDrag = getMaxDrag();
+    const nextDragX = Math.max(-maxDrag, Math.min(maxDrag, event.clientX - startXRef.current));
+    setDragX(nextDragX);
+  };
+
+  const handlePointerEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (startXRef.current === null) return;
+    event.stopPropagation();
+    const maxDrag = getMaxDrag();
+    const finalDragX = Math.max(
+      -maxDrag,
+      Math.min(maxDrag, event.clientX - startXRef.current)
+    );
+    if (finalDragX <= -maxDrag) {
+      resetDrag();
+      onMoveLater();
+      return;
+    }
+    if (finalDragX >= maxDrag) {
+      resetDrag();
+      onDone();
+      return;
+    }
+    resetDrag();
+  };
+
+  return (
+    <section
+      className="mb-3 rounded-[16px] border border-primary/25 bg-primary-soft px-3 py-3 shadow-[0_10px_30px_rgba(15,23,42,0.16)]"
+      aria-label={t("arrangements.dueNotice")}
+    >
+      <button
+        type="button"
+        className="block w-full text-left transition active:scale-[0.99]"
+        onClick={onOpen}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold leading-4 text-primary">
+              {t("arrangements.dueNotice")}
+            </p>
+            <h2 className="mt-1 line-clamp-2 text-[16px] font-semibold leading-5 text-text">
+              {arrangement.title}
+            </h2>
+            <p className="mt-1 text-xs leading-4 text-text-tertiary">
+              {formatArrangementMeta(arrangement, t, locale)}
+            </p>
+          </div>
+          <ArrangementChip
+            label={`${t("arrangements.importanceLevel")}：${t(
+              `arrangements.importance${arrangement.importance}`
+            )}`}
+          />
+        </div>
+      </button>
+      <div
+        ref={trackRef}
+        className="relative mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2 overflow-hidden rounded-full bg-bg px-2 py-2"
+      >
+        <span className="pointer-events-none text-center text-[11px] font-medium text-text-tertiary">
+          {t("arrangements.swipeToPendingBox")}
+        </span>
+        <button
+          type="button"
+          className="relative z-10 h-10 w-10 rounded-full bg-primary text-[11px] font-semibold text-on-primary shadow-[0_6px_18px_rgba(9,184,62,0.28)] transition-transform"
+          style={{ transform: `translateX(${dragX}px)` }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          onClick={(event) => event.stopPropagation()}
+          aria-label={t("arrangements.swipeHandle")}
+        >
+          {t("arrangements.swipeHandle")}
+        </button>
+        <span className="pointer-events-none text-center text-[11px] font-medium text-text-tertiary">
+          {t("arrangements.swipeToDone")}
+        </span>
+      </div>
+    </section>
+  );
+}
+
 function ArrangementCard({
   arrangement,
   locale,
@@ -3427,7 +3867,7 @@ function ArrangementCard({
   onClick: () => void;
 }) {
   const { t } = usePreferences();
-  const important = arrangement.importance === 3;
+  const important = arrangement.importance === 5;
   return (
     <button
       type="button"
@@ -3451,23 +3891,17 @@ function ArrangementCard({
         </span>
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
-        <ArrangementChip label={t(`arrangements.importance${arrangement.importance}`)} />
+        <ArrangementChip
+          label={`${t("arrangements.importanceLevel")}：${t(
+            `arrangements.importance${arrangement.importance}`
+          )}`}
+        />
         <ArrangementChip
           label={t("arrangements.contextCount").replace(
             "{count}",
             String(arrangement.contextRefs.length)
           )}
         />
-        {arrangement.updatedAt && (
-          <ArrangementChip
-            label={new Intl.DateTimeFormat(locale, {
-              month: "numeric",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-            }).format(arrangement.updatedAt)}
-          />
-        )}
       </div>
     </button>
   );
@@ -3485,22 +3919,35 @@ function ArrangementConfirmationCard({
   draft,
   onConfirm,
   onCancel,
+  onEdit,
   canConfirm = true,
 }: {
   draft: AiArrangementDraft;
   onConfirm: () => void;
   onCancel: () => void;
+  onEdit?: () => void;
   canConfirm?: boolean;
 }) {
   const { resolvedLocale, t } = usePreferences();
   return (
     <div className="mt-3 rounded-[12px] border border-primary/30 bg-primary-soft px-3 py-3">
-      <h3 className="text-[15px] font-semibold leading-5 text-text">
-        {draft.title}
-      </h3>
-      <p className="mt-1 text-xs leading-4 text-text-tertiary">
-        {formatDraftMeta(draft, t, resolvedLocale)}
-      </p>
+      <button
+        type="button"
+        className="block w-full rounded-[10px] text-left transition active:scale-[0.99]"
+        onClick={onEdit}
+      >
+        <h3 className="text-[15px] font-semibold leading-5 text-text">
+          {draft.title}
+        </h3>
+        <p className="mt-1 text-xs leading-4 text-text-tertiary">
+          {formatDraftMeta(draft, t, resolvedLocale)}
+        </p>
+        {onEdit && (
+          <p className="mt-2 text-[11px] font-medium leading-4 text-primary">
+            {t("arrangements.tapToEdit")}
+          </p>
+        )}
+      </button>
       {!canConfirm && (
         <p className="mt-2 rounded-[10px] bg-bg px-3 py-2 text-xs leading-4 text-primary">
           {t("arrangements.timeRequired")}
@@ -3527,6 +3974,145 @@ function ArrangementConfirmationCard({
   );
 }
 
+function ArrangementDraftEditScreen({
+  title,
+  initialDraft,
+  onBack,
+  onSave,
+}: {
+  title: string;
+  initialDraft: ArrangementDraftInput;
+  onBack: () => void;
+  onSave: (draft: ArrangementDraftInput) => void;
+}) {
+  const { t } = usePreferences();
+  const [draftTitle, setDraftTitle] = React.useState(initialDraft.title);
+  const [description, setDescription] = React.useState(initialDraft.description);
+  const [people, setPeople] = React.useState(initialDraft.people.join("、"));
+  const [timeText, setTimeText] = React.useState(initialDraft.timeText);
+  const [scheduledDate, setScheduledDate] = React.useState(
+    initialDraft.scheduledDate ?? ""
+  );
+  const [scheduledTime, setScheduledTime] = React.useState(
+    formatTimeInput(initialDraft.scheduledAt)
+  );
+  const [place, setPlace] = React.useState(initialDraft.place);
+  const [importance, setImportance] = React.useState<ArrangementImportance>(
+    initialDraft.importance
+  );
+  const [message, setMessage] = React.useState("");
+
+  const saveDraft = () => {
+    const nextTitle = draftTitle.trim();
+    if (!nextTitle) {
+      setMessage(t("arrangements.titleRequired"));
+      return;
+    }
+    const nextScheduledDate = parseDateInput(scheduledDate);
+    if (!nextScheduledDate) {
+      setMessage(t("arrangements.timeRequired"));
+      return;
+    }
+    onSave({
+      ...initialDraft,
+      title: nextTitle,
+      description,
+      people: splitInlineList(people),
+      timeText,
+      scheduledDate: nextScheduledDate,
+      scheduledAt: combineDateAndTime(nextScheduledDate, scheduledTime),
+      place,
+      importance,
+    });
+  };
+
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <MobilePageHeader title={title} onBack={onBack} />
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-3">
+        <section className="rounded-[14px] bg-surface px-3 py-3">
+          <div className="grid grid-cols-2 gap-2">
+            <FormInput
+              label={t("arrangements.fieldTitle")}
+              value={draftTitle}
+              onChange={setDraftTitle}
+            />
+            <FormInput
+              label={t("arrangements.fieldPeople")}
+              value={people}
+              onChange={setPeople}
+            />
+            <FormInput
+              label={t("arrangements.fieldTime")}
+              value={timeText}
+              onChange={setTimeText}
+            />
+            <FormInput
+              label={t("arrangements.fieldScheduledDate")}
+              value={scheduledDate}
+              onChange={setScheduledDate}
+              type="date"
+            />
+            <FormInput
+              label={t("arrangements.fieldScheduledTime")}
+              value={scheduledTime}
+              onChange={setScheduledTime}
+              type="time"
+            />
+            <FormInput
+              label={t("arrangements.fieldPlace")}
+              value={place}
+              onChange={setPlace}
+            />
+          </div>
+          <label className="mt-2 block">
+            <span className="text-xs font-medium leading-4 text-text-tertiary">
+              {t("arrangements.fieldDescription")}
+            </span>
+            <input
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              className="mt-1 h-10 w-full rounded-[10px] border border-border bg-bg px-3 text-sm text-text outline-none focus:border-primary"
+            />
+          </label>
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-xs text-text-tertiary">
+              {t("arrangements.importance")}
+            </span>
+            {([1, 2, 3, 4, 5] as ArrangementImportance[]).map((level) => (
+              <button
+                key={level}
+                type="button"
+                className={cn(
+                  "h-8 flex-1 rounded-[9px] border text-xs font-semibold transition active:scale-[0.98]",
+                  importance === level
+                    ? "border-primary bg-primary-soft text-primary"
+                    : "border-border bg-bg text-text-tertiary"
+                )}
+                onClick={() => setImportance(level as ArrangementImportance)}
+              >
+                {t(`arrangements.importance${level}`)}
+              </button>
+            ))}
+          </div>
+          {message && (
+            <p className="mt-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
+              {message}
+            </p>
+          )}
+          <button
+            type="button"
+            className="mt-3 h-10 w-full rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.98]"
+            onClick={saveDraft}
+          >
+            {t("arrangements.saveEdit")}
+          </button>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function ArrangementDetailScreen({
   arrangement,
   onBack,
@@ -3539,6 +4125,7 @@ function ArrangementDetailScreen({
   onOpenContext: (ref: ArrangementContextRef) => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
+  const [isEditing, setIsEditing] = React.useState(false);
 
   const updateStatus = (status: ArrangementStatus) => {
     onUpdateArrangement({ ...arrangement, status, updatedAt: Date.now() });
@@ -3548,9 +4135,41 @@ function ArrangementDetailScreen({
     onUpdateArrangement({ ...arrangement, importance, updatedAt: Date.now() });
   };
 
+  const saveArrangementEdit = (draft: ArrangementDraftInput) => {
+    onUpdateArrangement({
+      ...arrangement,
+      title: draft.title,
+      description: draft.description,
+      people: draft.people,
+      timeText: draft.timeText,
+      scheduledDate: draft.scheduledDate,
+      scheduledAt: draft.scheduledAt,
+      place: draft.place,
+      importance: draft.importance,
+      updatedAt: Date.now(),
+    });
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <ArrangementDraftEditScreen
+        title={t("arrangements.editTitle")}
+        initialDraft={arrangement}
+        onBack={() => setIsEditing(false)}
+        onSave={saveArrangementEdit}
+      />
+    );
+  }
+
   return (
     <div className="flex h-full flex-col bg-bg">
-      <MobilePageHeader title={t("arrangements.detailTitle")} onBack={onBack} />
+      <MobilePageHeader
+        title={t("arrangements.detailTitle")}
+        actionLabel={t("arrangements.edit")}
+        onAction={() => setIsEditing(true)}
+        onBack={onBack}
+      />
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-3">
         <section className="rounded-[14px] bg-surface px-4 py-4">
           <h1 className="text-[20px] font-bold leading-7 text-text">
@@ -3599,7 +4218,7 @@ function ArrangementDetailScreen({
             {t("arrangements.importance")}
           </h2>
           <div className="mt-3 grid grid-cols-3 gap-2">
-            {([1, 2, 3] as ArrangementImportance[]).map((level) => (
+            {([1, 2, 3, 4, 5] as ArrangementImportance[]).map((level) => (
               <button
                 key={level}
                 type="button"
@@ -3632,7 +4251,7 @@ function ArrangementDetailScreen({
                 >
                   <div className="flex items-center justify-between gap-2">
                     <p className="truncate text-xs font-semibold text-text">
-                      {ref.conversationTitle} 路 {ref.senderName}
+                      {ref.conversationTitle} · {ref.senderName}
                     </p>
                     <span className="shrink-0 text-[11px] text-text-disabled">
                       {new Intl.DateTimeFormat(resolvedLocale, {
@@ -3667,40 +4286,110 @@ function splitInlineList(value: string) {
     .filter(Boolean);
 }
 
-function parseDateTimeLocalInput(value: string) {
-  if (!value) return null;
-  const parsedTime = new Date(value).getTime();
-  return Number.isFinite(parsedTime) ? parsedTime : null;
+function parseDateInput(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsedTime = Date.parse(`${value}T00:00:00`);
+  return Number.isFinite(parsedTime) ? value : null;
 }
 
-function formatDateTimeLocalInput(value: number | null) {
+function formatDateInput(value: number | null) {
   if (!value) return "";
   const date = new Date(value);
   const pad = (item: number) => String(item).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
-    date.getDate()
-  )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatTimeInput(value: number | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  const pad = (item: number) => String(item).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function combineDateAndTime(dateValue: string, timeValue: string) {
+  const scheduledDate = parseDateInput(dateValue);
+  if (!scheduledDate || !timeValue) return null;
+  const parsedTime = new Date(`${scheduledDate}T${timeValue}`).getTime();
+  return Number.isFinite(parsedTime) ? parsedTime : null;
 }
 
 function getDayStart(value: Date) {
   return new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
 }
 
-function formatArrangementTime(
-  arrangement: Pick<ArrangementItem, "scheduledAt" | "timeText">,
-  t: ReturnType<typeof usePreferences>["t"],
-  locale: string
-) {
-  if (!arrangement.scheduledAt) return t("arrangements.timePending");
+function formatLocalDateValue(value: Date) {
+  const pad = (item: number) => String(item).padStart(2, "0");
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(
+    value.getDate()
+  )}`;
+}
 
-  const scheduledDate = new Date(arrangement.scheduledAt);
+function getCurrentMonthDateOptions(now: number): CalendarDateOption[] {
+  const currentDate = new Date(now);
+  const year = currentDate.getFullYear();
+  const month = currentDate.getMonth();
+  const todayValue = formatLocalDateValue(currentDate);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  return Array.from({ length: daysInMonth }, (_, index) => {
+    const date = new Date(year, month, index + 1);
+    return {
+      value: formatLocalDateValue(date),
+      day: index + 1,
+      weekday: "",
+      isToday: formatLocalDateValue(date) === todayValue,
+    };
+  });
+}
+
+function getArrangementDateValue(
+  arrangement: Pick<ArrangementItem, "scheduledDate" | "scheduledAt">
+) {
+  return arrangement.scheduledDate ?? (formatDateInput(arrangement.scheduledAt) || null);
+}
+
+function getArrangementSortDate(
+  arrangement: Pick<ArrangementItem, "scheduledDate" | "scheduledAt">
+) {
+  const scheduledDateText = getArrangementDateValue(arrangement);
+  if (!scheduledDateText) return Number.POSITIVE_INFINITY;
+  const parsedTime = new Date(`${scheduledDateText}T00:00:00`).getTime();
+  return Number.isFinite(parsedTime) ? parsedTime : Number.POSITIVE_INFINITY;
+}
+
+function sortArrangementsByStatusImportanceDate(items: ArrangementItem[]) {
+  return [...items].sort((left, right) => {
+    const statusOrder: Record<ArrangementStatus, number> = {
+      pending: 0,
+      later: 1,
+      done: 2,
+    };
+    if (statusOrder[left.status] !== statusOrder[right.status]) {
+      return statusOrder[left.status] - statusOrder[right.status];
+    }
+    if (right.importance !== left.importance) {
+      return right.importance - left.importance;
+    }
+    const leftDate = getArrangementSortDate(left);
+    const rightDate = getArrangementSortDate(right);
+    if (leftDate !== rightDate) {
+      return leftDate - rightDate;
+    }
+    return right.updatedAt - left.updatedAt;
+  });
+}
+
+function formatArrangementTime(
+  arrangement: Pick<ArrangementItem, "scheduledDate" | "scheduledAt" | "timeText">,
+  t: ReturnType<typeof usePreferences>["t"],
+  _locale: string
+) {
+  const scheduledDateText = getArrangementDateValue(arrangement);
+  if (!scheduledDateText) return t("arrangements.timePending");
+
+  const scheduledDate = new Date(`${scheduledDateText}T00:00:00`);
   const todayStart = getDayStart(new Date());
   const scheduledStart = getDayStart(scheduledDate);
   const dayDiff = Math.round((scheduledStart - todayStart) / (1000 * 60 * 60 * 24));
-  const time = new Intl.DateTimeFormat(locale, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(scheduledDate);
 
   let dayLabel: string;
   if (dayDiff === 0) {
@@ -3709,46 +4398,35 @@ function formatArrangementTime(
     dayLabel = t("arrangements.tomorrow");
   } else if (dayDiff === 2) {
     dayLabel = t("arrangements.dayAfterTomorrow");
-  } else if (dayDiff > 2 && dayDiff < 7) {
-    dayLabel = new Intl.DateTimeFormat(locale, { weekday: "long" }).format(
-      scheduledDate
-    );
   } else {
-    dayLabel = new Intl.DateTimeFormat(locale, {
-      month: "numeric",
-      day: "numeric",
-    }).format(scheduledDate);
+    dayLabel = scheduledDateText.split("-").join("/");
   }
 
-  return `${dayLabel} ${time}`;
+  return dayLabel;
 }
 
 function formatArrangementMeta(
   arrangement: Pick<
     ArrangementItem,
-    "people" | "timeText" | "scheduledAt" | "place"
+    "people" | "timeText" | "scheduledDate" | "scheduledAt" | "place"
   >,
   t: ReturnType<typeof usePreferences>["t"],
   locale: string
 ) {
   const scheduledLabel = formatArrangementTime(arrangement, t, locale);
-  const timeDetail =
-    arrangement.timeText && arrangement.timeText !== scheduledLabel
-      ? `${scheduledLabel} 路 ${arrangement.timeText}`
-      : scheduledLabel;
   return [
     arrangement.people.length > 0 ? arrangement.people.join("、") : "",
-    timeDetail,
+    scheduledLabel,
     arrangement.place,
   ]
     .filter(Boolean)
-    .join(" 路 ") || t("arrangements.noMeta");
+    .join(" · ") || t("arrangements.noMeta");
 }
 
 function formatDraftMeta(
   draft: Pick<
     AiArrangementDraft,
-    "people" | "timeText" | "scheduledAt" | "place"
+    "people" | "timeText" | "scheduledDate" | "scheduledAt" | "place"
   >,
   t: ReturnType<typeof usePreferences>["t"],
   locale: string
@@ -4514,7 +5192,17 @@ function SettingsListItem({
   );
 }
 
-function MobilePageHeader({ title, onBack }: { title: string; onBack: () => void }) {
+function MobilePageHeader({
+  title,
+  actionLabel,
+  onAction,
+  onBack,
+}: {
+  title: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  onBack: () => void;
+}) {
   const { t } = usePreferences();
 
   return (
@@ -4529,9 +5217,18 @@ function MobilePageHeader({ title, onBack }: { title: string; onBack: () => void
           <path d="M19 12H5M12 19l-7-7 7-7" />
         </svg>
       </button>
-      <h1 className="ml-1 truncate text-[17px] font-semibold leading-5 text-text">
+      <h1 className="ml-1 min-w-0 flex-1 truncate text-[17px] font-semibold leading-5 text-text">
         {title}
       </h1>
+      {actionLabel && onAction && (
+        <button
+          type="button"
+          className="mr-2 h-8 rounded-full bg-surface px-3 text-xs font-semibold text-text transition active:scale-[0.98]"
+          onClick={onAction}
+        >
+          {actionLabel}
+        </button>
+      )}
     </header>
   );
 }
