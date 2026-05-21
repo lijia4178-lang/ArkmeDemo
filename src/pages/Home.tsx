@@ -3348,40 +3348,6 @@ function ArrangementsScreen({
     );
   }
 
-  if (showPendingBox) {
-    return (
-      <div className="flex h-full flex-col bg-bg">
-        <MobilePageHeader
-          title={t("arrangements.pendingBox")}
-          onBack={() => setShowPendingBox(false)}
-        />
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-3">
-          <section className="space-y-3">
-            {sortedPendingBoxArrangements.length > 0 ? (
-              sortedPendingBoxArrangements.map((arrangement) => (
-                <ArrangementCard
-                  key={arrangement.id}
-                  arrangement={arrangement}
-                  locale={resolvedLocale}
-                  onClick={() => setSelectedArrangement(arrangement)}
-                />
-              ))
-            ) : (
-              <div className="rounded-[14px] bg-surface px-4 py-8 text-center">
-                <p className="text-sm font-semibold text-text">
-                  {t("arrangements.pendingBoxEmptyTitle")}
-                </p>
-                <p className="mt-1 text-xs text-text-tertiary">
-                  {t("arrangements.pendingBoxEmptyDesc")}
-                </p>
-              </div>
-            )}
-          </section>
-        </div>
-      </div>
-    );
-  }
-
   if (showCreateArrangement) {
     return (
       <div className="flex h-full flex-col bg-bg">
@@ -3520,59 +3486,88 @@ function ArrangementsScreen({
 
   return (
     <div className="flex h-full flex-col bg-bg">
-      <header className="shrink-0 bg-bg px-4 pb-2 pt-4">
+      <header className="shrink-0 bg-bg px-4 pb-3 pt-4">
         <div className="flex items-center justify-between">
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-[22px] font-bold leading-7 text-text">
+          <div className="grid min-w-0 flex-1 grid-cols-2 gap-2">
+            <button
+              type="button"
+              className={cn(
+                "h-10 min-w-0 rounded-[12px] border px-3 text-[16px] font-semibold leading-5 transition active:scale-[0.98]",
+                !showPendingBox
+                  ? "border-primary bg-primary-soft text-primary"
+                  : "border-border bg-surface text-text"
+              )}
+              onClick={() => setShowPendingBox(false)}
+            >
+              <span className="block truncate">
                 {t("arrangements.title")}
-              </h1>
-              <button
-                type="button"
-                className="h-7 rounded-full border border-border bg-surface px-2.5 text-[11px] font-semibold text-text transition active:scale-[0.98]"
-                onClick={() => setShowPendingBox(true)}
-              >
+              </span>
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "h-10 min-w-0 rounded-[12px] border px-3 text-[16px] font-semibold leading-5 transition active:scale-[0.98]",
+                showPendingBox
+                  ? "border-primary bg-primary-soft text-primary"
+                  : "border-border bg-surface text-text"
+              )}
+              onClick={() => setShowPendingBox(true)}
+            >
+              <span className="block truncate">
                 {t("arrangements.pendingBox")} {pendingBoxArrangements.length}
-              </button>
-            </div>
-            <p className="mt-1 text-xs leading-4 text-text-tertiary">
-              {t("arrangements.subtitle")}
-            </p>
+              </span>
+            </button>
           </div>
           <button
             type="button"
-            className="h-9 rounded-full border border-border bg-surface px-3 text-xs font-semibold text-text transition active:scale-[0.98]"
-            onClick={() => setShowCreateArrangement(true)}
+            className="ml-3 h-10 shrink-0 rounded-[12px] border border-border bg-surface px-3 text-xs font-semibold text-text transition active:scale-[0.98]"
+            onClick={() => {
+              setShowPendingBox(false);
+              setShowCreateArrangement(true);
+            }}
           >
             {t("arrangements.add")}
           </button>
         </div>
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <FilterSelect
-            label={t("arrangements.filterPeople")}
-            value={peopleFilter}
-            options={filterOptions.people}
-            onChange={setPeopleFilter}
-          />
-          <FilterSelect
-            label={t("arrangements.filterPlace")}
-            value={placeFilter}
-            options={filterOptions.places}
-            onChange={setPlaceFilter}
-          />
-        </div>
-        <CalendarDateFilter
-          dates={calendarDates}
-          countByDate={arrangementCountByDate}
-          value={timeFilter}
-          onChange={setTimeFilter}
-        />
+        {!showPendingBox && (
+          <>
+            <p className="mt-1 text-xs leading-4 text-text-tertiary">
+              {t("arrangements.subtitle")}
+            </p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <FilterSelect
+                label={t("arrangements.filterPeople")}
+                value={peopleFilter}
+                options={filterOptions.people}
+                onChange={setPeopleFilter}
+              />
+              <FilterSelect
+                label={t("arrangements.filterPlace")}
+                value={placeFilter}
+                options={filterOptions.places}
+                onChange={setPlaceFilter}
+              />
+            </div>
+            <CalendarDateFilter
+              dates={calendarDates}
+              countByDate={arrangementCountByDate}
+              value={timeFilter}
+              onChange={setTimeFilter}
+            />
+          </>
+        )}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">
         <section className="space-y-3">
-          {sortedArrangements.length > 0 ? (
-            sortedArrangements.map((arrangement) => (
+          {(showPendingBox
+            ? sortedPendingBoxArrangements
+            : sortedArrangements
+          ).length > 0 ? (
+            (showPendingBox
+              ? sortedPendingBoxArrangements
+              : sortedArrangements
+            ).map((arrangement) => (
               <ArrangementCard
                 key={arrangement.id}
                 arrangement={arrangement}
@@ -3583,10 +3578,14 @@ function ArrangementsScreen({
           ) : (
             <div className="rounded-[14px] bg-surface px-4 py-8 text-center">
               <p className="text-sm font-semibold text-text">
-                {t("arrangements.emptyTitle")}
+                {showPendingBox
+                  ? t("arrangements.pendingBoxEmptyTitle")
+                  : t("arrangements.emptyTitle")}
               </p>
               <p className="mt-1 text-xs text-text-tertiary">
-                {t("arrangements.emptyDesc")}
+                {showPendingBox
+                  ? t("arrangements.pendingBoxEmptyDesc")
+                  : t("arrangements.emptyDesc")}
               </p>
             </div>
           )}
@@ -3636,6 +3635,8 @@ type CalendarDateOption = {
   isToday: boolean;
 };
 
+type CalendarDateFilterMode = "compact" | "horizontal" | "expanded";
+
 function CalendarDateFilter({
   dates,
   countByDate,
@@ -3648,41 +3649,147 @@ function CalendarDateFilter({
   onChange: (value: string) => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
+  const [mode, setMode] = React.useState<CalendarDateFilterMode>("compact");
+  const gestureStartRef = React.useRef<{ x: number; y: number } | null>(null);
+  const didSwipeRef = React.useRef(false);
+  const compactDates = React.useMemo(
+    () =>
+      dates.filter((date) => {
+        const relation = getRelativeDateIndex(date.value);
+        return relation >= 0 && relation <= 2;
+      }),
+    [dates]
+  );
+  const expandedDates = React.useMemo(() => {
+    const compactDateValues = new Set(compactDates.map((date) => date.value));
+    return [
+      ...compactDates,
+      ...dates.filter((date) => !compactDateValues.has(date.value)),
+    ];
+  }, [compactDates, dates]);
+  const visibleDates = mode === "compact" ? compactDates : expandedDates;
+  const compactMode = mode === "compact";
+  const expandedMode = mode === "expanded";
+
+  const startGesture = (x: number, y: number) => {
+    gestureStartRef.current = { x, y };
+    didSwipeRef.current = false;
+  };
+
+  const finishGesture = (x: number, y: number) => {
+    if (!gestureStartRef.current) return;
+    const deltaX = x - gestureStartRef.current.x;
+    const deltaY = y - gestureStartRef.current.y;
+    gestureStartRef.current = null;
+    const absX = Math.abs(deltaX);
+    const absY = Math.abs(deltaY);
+    if (absY > 28 && absY > absX && deltaY > 0) {
+      didSwipeRef.current = true;
+      setMode("expanded");
+      return;
+    }
+    if (absX > 28 && absX > absY) {
+      didSwipeRef.current = true;
+      setMode("horizontal");
+    }
+  };
+
+  const updateGesture = (x: number, y: number) => {
+    if (!gestureStartRef.current) return;
+    const deltaX = x - gestureStartRef.current.x;
+    const deltaY = y - gestureStartRef.current.y;
+    const absX = Math.abs(deltaX);
+    const absY = Math.abs(deltaY);
+    if (absY > 28 && absY > absX && deltaY > 0) {
+      didSwipeRef.current = true;
+      gestureStartRef.current = null;
+      setMode("expanded");
+      return;
+    }
+    if (absX > 28 && absX > absY) {
+      didSwipeRef.current = true;
+      gestureStartRef.current = null;
+      setMode("horizontal");
+    }
+  };
+
+  const handleDateClick = (dateValue: string) => {
+    if (didSwipeRef.current) {
+      didSwipeRef.current = false;
+      return;
+    }
+    onChange(value === dateValue ? "all" : dateValue);
+  };
+
   return (
-    <section aria-label={t("arrangements.filterTime")} className="mt-3">
-      <div className="flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button
-          type="button"
-          className={cn(
-            "flex h-12 min-w-[54px] shrink-0 flex-col items-center justify-center rounded-[12px] border px-2 text-xs font-semibold transition active:scale-[0.98]",
-            value === "all"
-              ? "border-primary bg-primary text-on-primary"
-              : "border-border bg-surface text-text"
-          )}
-          onClick={() => onChange("all")}
-        >
-          {t("arrangements.all")}
-        </button>
-        {dates.map((date) => {
+    <section
+      aria-label={t("arrangements.filterTime")}
+      className="mt-3"
+      onPointerDown={(event) => {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        startGesture(event.clientX, event.clientY);
+      }}
+      onPointerMove={(event) => updateGesture(event.clientX, event.clientY)}
+      onPointerUp={(event) => finishGesture(event.clientX, event.clientY)}
+      onPointerCancel={() => {
+        gestureStartRef.current = null;
+      }}
+      onTouchStart={(event) => {
+        const touch = event.touches[0];
+        if (touch) startGesture(touch.clientX, touch.clientY);
+      }}
+      onTouchMove={(event) => {
+        const touch = event.touches[0];
+        if (touch) updateGesture(touch.clientX, touch.clientY);
+      }}
+      onTouchEnd={(event) => {
+        const touch = event.changedTouches[0];
+        if (touch) finishGesture(touch.clientX, touch.clientY);
+      }}
+    >
+      <div
+        className={cn(
+          "gap-2 pb-1",
+          compactMode && "grid grid-cols-3",
+          mode === "horizontal" &&
+            "flex overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+          expandedMode && "grid grid-cols-7"
+        )}
+      >
+        {visibleDates.map((date) => {
           const count = countByDate.get(date.value) ?? 0;
           const selected = value === date.value;
+          const relation = getRelativeDateIndex(date.value);
+          const relativeLabel =
+            relation === 0
+              ? t("arrangements.today")
+              : relation === 1
+                ? t("arrangements.tomorrow")
+                : relation === 2
+                  ? t("arrangements.dayAfterTomorrow")
+                  : null;
           return (
             <button
               key={date.value}
               type="button"
               className={cn(
-                "flex h-12 min-w-[46px] shrink-0 flex-col items-center justify-center rounded-[12px] border px-2 text-xs transition active:scale-[0.98]",
+                "flex h-12 flex-col items-center justify-center rounded-[12px] border text-xs transition active:scale-[0.98]",
+                compactMode ? "min-w-0 px-2" : "w-12 min-w-[48px] shrink-0 px-1",
                 getCalendarHeatClass(count),
                 date.isToday && "border-primary text-primary",
                 selected && "border-primary bg-primary text-on-primary"
               )}
-              onClick={() => onChange(date.value)}
+              onClick={() => handleDateClick(date.value)}
               aria-label={`${date.value} ${count}`}
             >
               <span className="text-[11px] leading-3 opacity-80">
-                {new Intl.DateTimeFormat(resolvedLocale, {
-                  weekday: "narrow",
-                }).format(new Date(`${date.value}T00:00:00`)) || date.weekday}
+                {compactMode && relativeLabel
+                  ? relativeLabel
+                  : relativeLabel ??
+                    (new Intl.DateTimeFormat(resolvedLocale, {
+                      weekday: "narrow",
+                    }).format(new Date(`${date.value}T00:00:00`)) ||
+                      date.weekday)}
               </span>
               <span className="mt-0.5 text-[15px] font-semibold leading-4">
                 {date.day}
@@ -3693,6 +3800,14 @@ function CalendarDateFilter({
       </div>
     </section>
   );
+}
+
+function getRelativeDateIndex(value: string) {
+  const target = new Date(`${value}T00:00:00`);
+  if (!Number.isFinite(target.getTime())) return Number.NaN;
+  const todayStart = getDayStart(new Date());
+  const targetStart = getDayStart(target);
+  return Math.round((targetStart - todayStart) / (1000 * 60 * 60 * 24));
 }
 
 function getCalendarHeatClass(count: number) {
@@ -4330,15 +4445,30 @@ function getCurrentMonthDateOptions(now: number): CalendarDateOption[] {
   const month = currentDate.getMonth();
   const todayValue = formatLocalDateValue(currentDate);
   const daysInMonth = new Date(year, month + 1, 0).getDate();
-  return Array.from({ length: daysInMonth }, (_, index) => {
+  const dateByValue = new Map<string, CalendarDateOption>();
+  Array.from({ length: daysInMonth }, (_, index) => {
     const date = new Date(year, month, index + 1);
-    return {
-      value: formatLocalDateValue(date),
+    const value = formatLocalDateValue(date);
+    dateByValue.set(value, {
+      value,
       day: index + 1,
       weekday: "",
-      isToday: formatLocalDateValue(date) === todayValue,
-    };
+      isToday: value === todayValue,
+    });
   });
+  for (const offset of [0, 1, 2]) {
+    const date = new Date(year, month, currentDate.getDate() + offset);
+    const value = formatLocalDateValue(date);
+    dateByValue.set(value, {
+      value,
+      day: date.getDate(),
+      weekday: "",
+      isToday: value === todayValue,
+    });
+  }
+  return Array.from(dateByValue.values()).sort((left, right) =>
+    left.value.localeCompare(right.value)
+  );
 }
 
 function getArrangementDateValue(

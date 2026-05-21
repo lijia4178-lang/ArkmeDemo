@@ -443,18 +443,6 @@ export default function ChatBubble({
                         {action.label}
                       </span>
                     </span>
-                    <svg
-                      className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M6 4l4 4-4 4" />
-                    </svg>
                   </button>
                 ))}
               </div>
