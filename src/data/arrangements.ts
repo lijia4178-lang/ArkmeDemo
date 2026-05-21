@@ -802,7 +802,7 @@ export async function recognizeArrangement(
       },
       body: JSON.stringify({
         model: config.model.trim(),
-        temperature: 1,
+        temperature: 0.6,
         max_tokens: 520,
         stream: true,
         thinking: { type: "disabled" },
