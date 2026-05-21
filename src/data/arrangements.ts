@@ -512,7 +512,7 @@ function readTextContent(value: unknown): string {
     .join("");
 }
 
-function shouldReadTextForKey(key: string) {
+function shouldReadPrimaryTextForKey(key: string) {
   return (
     key === "content" ||
     key === "delta" ||
@@ -521,9 +521,17 @@ function shouldReadTextForKey(key: string) {
   );
 }
 
+function shouldReadReasoningTextForKey(key: string) {
+  return (
+    key === "reasoning_content" ||
+    key === "reasoning" ||
+    key === "reasoning_text"
+  );
+}
+
 function collectAiTextFragments(value: unknown, keyHint = ""): string[] {
   if (typeof value === "string") {
-    return shouldReadTextForKey(keyHint) ? [value] : [];
+    return shouldReadPrimaryTextForKey(keyHint) ? [value] : [];
   }
 
   if (Array.isArray(value)) {
@@ -554,33 +562,96 @@ function collectAiTextFragments(value: unknown, keyHint = ""): string[] {
   );
 }
 
-function extractAiContentFromPayload(payload: unknown): string {
-  if (isDirectAiJsonPayload(payload)) return JSON.stringify(payload);
+function collectAiReasoningFragments(value: unknown, keyHint = ""): string[] {
+  if (typeof value === "string") {
+    return shouldReadReasoningTextForKey(keyHint) ? [value] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectAiReasoningFragments(item, keyHint));
+  }
+
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  if (isDirectAiJsonPayload(value)) {
+    return [JSON.stringify(value)];
+  }
+
+  const objectValue = value as Record<string, unknown>;
+  const preferredKeys = [
+    "reasoning_content",
+    "reasoning_text",
+    "reasoning",
+    "message",
+    "delta",
+    "output",
+    "choices",
+  ];
+
+  return preferredKeys.flatMap((key) =>
+    key in objectValue ? collectAiReasoningFragments(objectValue[key], key) : []
+  );
+}
+
+type ExtractedAiContent = {
+  primary: string;
+  reasoning: string;
+};
+
+function extractAiContentFromPayload(payload: unknown): ExtractedAiContent {
+  if (isDirectAiJsonPayload(payload)) {
+    return { primary: JSON.stringify(payload), reasoning: "" };
+  }
 
   const outputText = normalizeText(getObjectValue(payload, "output_text"));
-  if (outputText) return outputText;
+  if (outputText) return { primary: outputText, reasoning: "" };
+
+  const responseType = normalizeText(getObjectValue(payload, "type"));
+  const topLevelDelta = normalizeText(getObjectValue(payload, "delta"));
+  if (topLevelDelta && responseType.includes("reasoning")) {
+    return { primary: "", reasoning: topLevelDelta };
+  }
+  if (topLevelDelta) {
+    return { primary: topLevelDelta, reasoning: "" };
+  }
 
   const choices = getObjectValue(payload, "choices");
   if (Array.isArray(choices)) {
-    return choices
-      .map((choice) => {
-        const deltaContent = readTextContent(
-          getObjectValue(getObjectValue(choice, "delta"), "content")
-        );
-        const messageContent = readTextContent(
-          getObjectValue(getObjectValue(choice, "message"), "content")
-        );
-        const textContent = readTextContent(getObjectValue(choice, "text"));
-        return deltaContent || messageContent || textContent;
-      })
-      .filter(Boolean)
-      .join("");
+    const parts = choices.map((choice) => {
+      const delta = getObjectValue(choice, "delta");
+      const message = getObjectValue(choice, "message");
+      const deltaContent = readTextContent(
+        getObjectValue(delta, "content")
+      );
+      const messageContent = readTextContent(
+        getObjectValue(message, "content")
+      );
+      const textContent = readTextContent(getObjectValue(choice, "text"));
+      const reasoningContent =
+        readTextContent(getObjectValue(delta, "reasoning_content")) ||
+        readTextContent(getObjectValue(delta, "reasoning")) ||
+        readTextContent(getObjectValue(delta, "reasoning_text")) ||
+        readTextContent(getObjectValue(message, "reasoning_content")) ||
+        readTextContent(getObjectValue(message, "reasoning"));
+      return {
+        primary: deltaContent || messageContent || textContent,
+        reasoning: reasoningContent,
+      };
+    });
+    return {
+      primary: parts.map((part) => part.primary).filter(Boolean).join(""),
+      reasoning: parts.map((part) => part.reasoning).filter(Boolean).join(""),
+    };
   }
 
-  return (
-    readTextContent(getObjectValue(payload, "content")) ||
-    collectAiTextFragments(payload).join("")
-  );
+  return {
+    primary:
+      readTextContent(getObjectValue(payload, "content")) ||
+      collectAiTextFragments(payload).join(""),
+    reasoning: collectAiReasoningFragments(payload).join(""),
+  };
 }
 
 function isDirectAiJsonPayload(payload: unknown) {
@@ -602,7 +673,7 @@ async function readAiResponseContent(response: Response) {
   try {
     const payload = JSON.parse(rawText) as unknown;
     const content = extractAiContentFromPayload(payload);
-    if (content.trim()) return content.trim();
+    if (content.primary.trim()) return content.primary.trim();
     if (isDirectAiJsonPayload(payload)) return JSON.stringify(payload);
   } catch {
     // Fall through to SSE parsing for OpenAI-compatible streaming responses.
@@ -619,7 +690,8 @@ async function readAiResponseContent(response: Response) {
 
     try {
       const chunk = JSON.parse(data) as unknown;
-      content += extractAiContentFromPayload(chunk);
+      const extractedContent = extractAiContentFromPayload(chunk);
+      content += extractedContent.primary;
     } catch {
       // Ignore malformed keep-alive chunks from OpenAI-compatible gateways.
     }
@@ -633,6 +705,54 @@ function buildAiJsonErrorMessage(content: string) {
   return preview
     ? `AI 未返回有效 JSON 内容：${preview}`
     : "AI 未返回有效 JSON 内容";
+}
+
+const arrangementRecognitionSystemPrompt = [
+  "你是一个只输出 JSON 的安排识别函数，不是聊天助手。",
+  "禁止输出分析、推理、解释、Markdown、代码块、前缀、后缀、自然语言或 <think>。",
+  "最终回复必须满足：第一个字符是 {，最后一个字符是 }，整段内容可以被 JSON.parse 直接解析。",
+  "唯一允许的 JSON 结构：{\"title\":\"\",\"description\":\"\",\"people\":[],\"timeText\":\"\",\"scheduledDate\":null,\"scheduledAt\":null,\"place\":\"\",\"importance\":1}。",
+  "识别未来需要执行、关注、确认或继续推进的事项。",
+  "无安排时也必须返回同结构，且 title 为空字符串，不要解释原因。",
+  "相对日期按输入中的参考时间解析为 YYYY-MM-DD 的 scheduledDate。",
+  "只有明确时刻如 09:00、上午九点、下午3点才返回毫秒 scheduledAt；仅明天、后天、上午、下午不虚构时刻，scheduledAt 返回 null。",
+].join("\n");
+
+function buildArrangementRecognitionUserPrompt(content: string) {
+  return [
+    "从下面 INPUT 中识别安排，并只返回 JSON。",
+    "输出前自检：不能出现“分析：”“用户要求”“消息内容”“根据”“因此”等 JSON 字段外文字。",
+    "字段要求：title, description, people, timeText, scheduledDate, scheduledAt, place, importance。",
+    "importance 只能是 1、2、3、4、5，5 最重要。",
+    "如果无法识别为安排，返回：{\"title\":\"\",\"description\":\"\",\"people\":[],\"timeText\":\"\",\"scheduledDate\":null,\"scheduledAt\":null,\"place\":\"\",\"importance\":1}",
+    "<INPUT>",
+    content,
+    "</INPUT>",
+    "只输出 JSON：",
+  ].join("\n");
+}
+
+const dailyReviewSystemPrompt = [
+  "你是一个只输出 JSON 的安排复盘函数，不是聊天助手。",
+  "禁止输出分析、推理、解释、Markdown、代码块、前缀、后缀、自然语言或 <think>。",
+  "最终回复必须满足：第一个字符是 {，最后一个字符是 }，整段内容可以被 JSON.parse 直接解析。",
+  "唯一允许的 JSON 结构：{\"suggestions\":[]}。",
+  "根据聊天内容判断是否有新信息可以更新已有安排。",
+  "不要创建新安排，不要更新已完成或待定安排。",
+  "没有可靠更新时返回 {\"suggestions\":[]}，不要解释原因。",
+].join("\n");
+
+function buildDailyReviewUserPrompt(content: string) {
+  return [
+    "从下面 INPUT 中识别已有安排的更新，并只返回 JSON。",
+    "输出前自检：不能出现“分析：”“用户要求”“消息内容”“根据”“因此”等 JSON 字段外文字。",
+    "返回格式：{\"suggestions\":[{\"arrangementId\":\"...\",\"appendDescription\":\"...\",\"confidence\":0.8,\"reason\":\"...\",\"contextRefs\":[{\"conversationId\":\"...\",\"messageId\":\"...\"}]}]}。",
+    "appendDescription 只写需要追加到安排描述的新事实，比如检查结果、对方补充信息、地点变更等；不要重复安排已有描述。",
+    "<INPUT>",
+    content,
+    "</INPUT>",
+    "只输出 JSON：",
+  ].join("\n");
 }
 
 function getAiHttpErrorMessage(status: number, detail: string) {
@@ -683,17 +803,17 @@ export async function recognizeArrangement(
       body: JSON.stringify({
         model: config.model.trim(),
         temperature: 1,
-        max_tokens: 260,
+        max_tokens: 520,
         stream: true,
+        thinking: { type: "disabled" },
         messages: [
           {
             role: "system",
-            content:
-              "你是安排识别器。只返回紧凑 JSON。识别未来需要执行/关注/确认的安排；无安排则 title 为空。相对日期按输入参考时间解析为 YYYY-MM-DD 的 scheduledDate。只有明确时刻如 09:00、上午九点、下午3点才返回毫秒 scheduledAt；仅明天/后天/上午/下午不虚构时刻，scheduledAt 返回 null。",
+            content: arrangementRecognitionSystemPrompt,
           },
           {
             role: "user",
-            content: `输出字段：title, description, people, timeText, scheduledDate, scheduledAt, place, importance。importance 只能是 1、2、3、4、5，5 最重要。内容：\n${normalizedContent}`,
+            content: buildArrangementRecognitionUserPrompt(normalizedContent),
           },
         ],
         response_format: { type: "json_object" },
@@ -759,18 +879,15 @@ export async function recognizeArrangementDailyUpdates(
         temperature: 0.6,
         max_tokens: 720,
         stream: true,
+        thinking: { type: "disabled" },
         messages: [
           {
             role: "system",
-            content:
-              "你是安排复盘助手。只返回紧凑 JSON。根据聊天内容判断是否有新信息可以更新已有安排。不要创建新安排，不要更新已完成或待定安排。没有可靠更新时返回空 suggestions。",
+            content: dailyReviewSystemPrompt,
           },
           {
             role: "user",
-            content:
-              "返回格式：{\"suggestions\":[{\"arrangementId\":\"...\",\"appendDescription\":\"...\",\"confidence\":0.8,\"reason\":\"...\",\"contextRefs\":[{\"conversationId\":\"...\",\"messageId\":\"...\"}]}]}。\n" +
-              "appendDescription 只写需要追加到安排描述的新事实，比如检查结果、对方补充信息、地点变更等；不要重复安排已有描述。\n" +
-              normalizedContent,
+            content: buildDailyReviewUserPrompt(normalizedContent),
           },
         ],
         response_format: { type: "json_object" },

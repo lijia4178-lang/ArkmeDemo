@@ -2,22 +2,39 @@ import { useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { usePreferences } from "@/settings/preferences";
 
+export type ChatInputSendTarget = {
+  id: string;
+  label: string;
+  description?: string;
+  iconLabel: string;
+  onSubmit: (content: string) => void;
+};
+
 type ChatInputProps = {
   onSubmit: (content: string) => void;
   onVoiceSubmit: () => void;
+  sendTargets?: ChatInputSendTarget[];
 };
 
 const LONG_PRESS_MS = 500;
 
-export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
+export default function ChatInput({
+  onSubmit,
+  onVoiceSubmit,
+  sendTargets = [],
+}: ChatInputProps) {
   const { t } = usePreferences();
   const [value, setValue] = useState("");
   const [readOnly, setReadOnly] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+  const [showSendTargetMenu, setShowSendTargetMenu] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const longPressTimerRef = useRef<number | null>(null);
+  const sendLongPressTimerRef = useRef<number | null>(null);
   const longPressTriggeredRef = useRef(false);
+  const sendLongPressTriggeredRef = useRef(false);
   const hasContent = value.trim().length > 0;
+  const canChooseSendTarget = sendTargets.length > 0;
 
   const submit = () => {
     const content = value.trim();
@@ -25,12 +42,29 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
     onSubmit(content);
     setValue("");
     setReadOnly(true);
+    setShowSendTargetMenu(false);
+  };
+
+  const submitToTarget = (target: ChatInputSendTarget) => {
+    const content = value.trim();
+    if (!content) return;
+    target.onSubmit(content);
+    setValue("");
+    setReadOnly(true);
+    setShowSendTargetMenu(false);
   };
 
   const clearLongPressTimer = () => {
     if (longPressTimerRef.current !== null) {
       window.clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
+    }
+  };
+
+  const clearSendLongPressTimer = () => {
+    if (sendLongPressTimerRef.current !== null) {
+      window.clearTimeout(sendLongPressTimerRef.current);
+      sendLongPressTimerRef.current = null;
     }
   };
 
@@ -74,6 +108,29 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
     clearLongPressTimer();
     setIsRecording(false);
     longPressTriggeredRef.current = false;
+  };
+
+  const handleSendPointerDown = () => {
+    sendLongPressTriggeredRef.current = false;
+    clearSendLongPressTimer();
+    if (!canChooseSendTarget) return;
+
+    sendLongPressTimerRef.current = window.setTimeout(() => {
+      sendLongPressTriggeredRef.current = true;
+      setShowSendTargetMenu(true);
+    }, LONG_PRESS_MS);
+  };
+
+  const handleSendPointerUp = () => {
+    clearSendLongPressTimer();
+  };
+
+  const handleSendClick = () => {
+    if (sendLongPressTriggeredRef.current) {
+      sendLongPressTriggeredRef.current = false;
+      return;
+    }
+    submit();
   };
 
   return (
@@ -143,9 +200,42 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
         {hasContent && (
           <div className="absolute bottom-0 right-0 top-0 flex items-end pr-4">
             <div className="mb-[7px] flex h-10 items-center">
+              {showSendTargetMenu && (
+                <div className="absolute bottom-12 right-0 z-20 w-56 overflow-hidden rounded-[14px] border border-border bg-surface p-1 shadow-soft">
+                  <div className="px-3 py-2 text-[11px] font-semibold leading-4 text-text-tertiary">
+                    发送到
+                  </div>
+                  {sendTargets.map((target) => (
+                    <button
+                      key={target.id}
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-[10px] px-2.5 py-2 text-left transition hover:bg-hover-overlay active:scale-[0.99]"
+                      onClick={() => submitToTarget(target)}
+                    >
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-soft text-[11px] font-semibold text-primary">
+                        {target.iconLabel}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] font-semibold leading-4 text-text">
+                          {target.label}
+                        </span>
+                        {target.description && (
+                          <span className="mt-0.5 block truncate text-[11px] leading-3 text-text-tertiary">
+                            {target.description}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <button
                 type="button"
-                onClick={submit}
+                onPointerDown={handleSendPointerDown}
+                onPointerUp={handleSendPointerUp}
+                onPointerLeave={handleSendPointerUp}
+                onPointerCancel={handleSendPointerUp}
+                onClick={handleSendClick}
                 className="flex h-10 w-10 items-center justify-center rounded-full text-primary transition active:scale-[0.9]"
                 title={t("composer.send")}
                 aria-label={t("composer.send")}

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import ChatInput from "@/components/ChatInput";
+import ChatInput, { type ChatInputSendTarget } from "@/components/ChatInput";
 import ChatList from "@/components/ChatList";
 import EmptyState from "@/components/EmptyState";
 import { usePreferences } from "@/settings/preferences";
@@ -20,6 +20,7 @@ type RecordsProps = {
   aiConversationEntries?: AiConversationEntry[];
   selfRecords?: RecordItem[];
   onCreateSelfRecord?: (content: string) => void;
+  sendTargets?: ChatInputSendTarget[];
   onOpenSourceConversation?: (source: RecordSourceConversation) => void;
   onOpenRecordDetail?: (record: RecordItem) => void;
   onOpenRecordSnapshot?: (record: RecordItem) => void;
@@ -49,6 +50,7 @@ export default function Records({
   aiConversationEntries = [],
   selfRecords = [],
   onCreateSelfRecord,
+  sendTargets = [],
   onOpenSourceConversation,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
@@ -197,6 +199,7 @@ export default function Records({
         <ChatInput
           onSubmit={handleCreateRecord}
           onVoiceSubmit={handleCreateVoiceRecord}
+          sendTargets={sendTargets}
         />
       )}
 

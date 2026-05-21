@@ -1,5 +1,5 @@
 import React from "react";
-import ChatInput from "@/components/ChatInput";
+import ChatInput, { type ChatInputSendTarget } from "@/components/ChatInput";
 import { useCandidateProfile } from "@/data/candidateProfile";
 import { formatBubbleTime } from "@/lib/time";
 import { usePreferences } from "@/settings/preferences";
@@ -11,6 +11,7 @@ type RecordFullDetailScreenProps = {
   onBack: () => void;
   onCreateExtension: (record: RecordItem, content: string) => void;
   onOpenSource?: (source: RecordSourceConversation) => void;
+  sendTargets?: ChatInputSendTarget[];
 };
 
 export default function RecordFullDetailScreen({
@@ -19,6 +20,7 @@ export default function RecordFullDetailScreen({
   onBack,
   onCreateExtension,
   onOpenSource,
+  sendTargets = [],
 }: RecordFullDetailScreenProps) {
   const { t } = usePreferences();
   const candidateProfile = useCandidateProfile();
@@ -81,6 +83,7 @@ export default function RecordFullDetailScreen({
       <ChatInput
         onSubmit={(content) => onCreateExtension(record, content)}
         onVoiceSubmit={() => onCreateExtension(record, t("records.voiceRecord"))}
+        sendTargets={sendTargets}
       />
     </div>
   );

@@ -1,7 +1,7 @@
 import React from "react";
 import AppShell from "@/layouts/AppShell";
 import ChatBubble from "@/components/ChatBubble";
-import ChatInput from "@/components/ChatInput";
+import ChatInput, { type ChatInputSendTarget } from "@/components/ChatInput";
 import ChatList from "@/components/ChatList";
 import RecordDetailSheet from "@/components/RecordDetailSheet";
 import RecordFullDetailScreen from "@/components/RecordFullDetailScreen";
@@ -393,8 +393,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     React.useState<AiArrangementDraft | null>(null);
   const [dailyReviewSuggestion, setDailyReviewSuggestion] =
     React.useState<ArrangementDailyReviewSuggestion | null>(null);
-  const [dailyReviewMessage, setDailyReviewMessage] = React.useState("");
-  const [isDailyReviewing, setIsDailyReviewing] = React.useState(false);
+  const [, setDailyReviewMessage] = React.useState("");
+  const [, setIsDailyReviewing] = React.useState(false);
   const [editingSelfArrangementDraft, setEditingSelfArrangementDraft] =
     React.useState<AiArrangementDraft | null>(null);
   const [selfArrangementMessage, setSelfArrangementMessage] = React.useState("");
@@ -1481,6 +1481,27 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     setTestConversationTargetUid(`test-${reply.id}`);
   }, [markTestConversationAsRead]);
 
+  const composerSendTargets = React.useMemo<ChatInputSendTarget[]>(
+    () => [
+      {
+        id: "self",
+        label: t("sendToSelf.title"),
+        description: t("sendToSelf.privateTag"),
+        iconLabel: t("sendToSelf.icon"),
+        onSubmit: createSelfRecord,
+      },
+      ...testConversationSummaries.map((summary) => ({
+        id: summary.conversationId,
+        label: summary.title,
+        description:
+          summary.conversationType === "group" ? summary.subtitle : "私聊",
+        iconLabel: summary.avatarLabel,
+        onSubmit: (content: string) => createTestReply(summary, content),
+      })),
+    ],
+    [createSelfRecord, createTestReply, t, testConversationSummaries]
+  );
+
   const openSourceConversation = React.useCallback(
     (source: RecordSourceConversation) => {
       const returnContext: ConversationReturnContext = {
@@ -1522,6 +1543,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onBack={() => setRecordDetail(null)}
           onCreateExtension={createRecordExtension}
           onOpenSource={openSourceConversation}
+          sendTargets={composerSendTargets}
         />
       );
     }
@@ -1574,6 +1596,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           targetUid={sendToSelfTargetUid}
           onBack={handleConversationBack}
           onCreateRecord={createSelfRecord}
+          sendTargets={composerSendTargets}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
           pendingArrangementDraft={selfArrangementDraft}
@@ -1600,6 +1623,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
           onCreateReply={(content) => createTestReply(activeTestConversationSummary, content)}
+          sendTargets={composerSendTargets}
           pendingArrangementDraft={selfArrangementDraft}
           arrangementMessage={selfArrangementMessage}
           recognizingArrangementUid={recognizingSelfArrangementUid}
@@ -1655,8 +1679,6 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           aiConfig={arrangementAiConfig}
           contextRefs={arrangementContextRefs}
           dailyReviewSuggestion={dailyReviewSuggestion}
-          dailyReviewMessage={dailyReviewMessage}
-          isDailyReviewing={isDailyReviewing}
           openArrangementId={arrangementToOpenId}
           onOpenedArrangement={() => setArrangementToOpenId(null)}
           onAddArrangement={(arrangement) =>
@@ -1705,6 +1727,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           aiConversationEntries={aiConversationLogEntries}
           selfRecords={selfRecords}
           onCreateSelfRecord={createSelfRecord}
+          sendTargets={composerSendTargets}
           onOpenSourceConversation={openSourceConversation}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
@@ -2835,6 +2858,7 @@ function SendToSelfConversationChat({
   targetUid,
   onBack,
   onCreateRecord,
+  sendTargets,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
   pendingArrangementDraft,
@@ -2849,6 +2873,7 @@ function SendToSelfConversationChat({
   targetUid?: string | null;
   onBack: () => void;
   onCreateRecord: (content: string) => void;
+  sendTargets: ChatInputSendTarget[];
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
   pendingArrangementDraft: AiArrangementDraft | null;
@@ -2937,6 +2962,7 @@ function SendToSelfConversationChat({
       <ChatInput
         onSubmit={onCreateRecord}
         onVoiceSubmit={() => onCreateRecord(t("records.voiceRecord"))}
+        sendTargets={sendTargets}
       />
     </div>
   );
@@ -2949,6 +2975,7 @@ function TestIdentityConversationChat({
   onOpenRecordDetail,
   onOpenRecordSnapshot,
   onCreateReply,
+  sendTargets,
   pendingArrangementDraft,
   arrangementMessage,
   recognizingArrangementUid,
@@ -2963,6 +2990,7 @@ function TestIdentityConversationChat({
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
   onCreateReply: (content: string) => void;
+  sendTargets: ChatInputSendTarget[];
   pendingArrangementDraft: AiArrangementDraft | null;
   arrangementMessage: string;
   recognizingArrangementUid: string | null;
@@ -2980,7 +3008,8 @@ function TestIdentityConversationChat({
     () => [...summary.records].sort((a, b) => a.send_at - b.send_at),
     [summary.records]
   );
-  const canRecognizeArrangement = summary.conversationType === "private";
+  const canRecognizeArrangement =
+    summary.conversationType === "private" || summary.conversationType === "group";
 
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
@@ -3164,6 +3193,7 @@ function TestIdentityConversationChat({
       <ChatInput
         onSubmit={onCreateReply}
         onVoiceSubmit={() => onCreateReply(t("records.voiceRecord"))}
+        sendTargets={sendTargets}
       />
     </div>
   );
@@ -3353,8 +3383,6 @@ function ArrangementsScreen({
   aiConfig,
   contextRefs,
   dailyReviewSuggestion,
-  dailyReviewMessage,
-  isDailyReviewing,
   openArrangementId,
   onOpenedArrangement,
   onAddArrangement,
@@ -3367,8 +3395,6 @@ function ArrangementsScreen({
   aiConfig: AiArrangementConfig;
   contextRefs: ArrangementContextRef[];
   dailyReviewSuggestion: ArrangementDailyReviewSuggestion | null;
-  dailyReviewMessage: string;
-  isDailyReviewing: boolean;
   openArrangementId?: string | null;
   onOpenedArrangement?: () => void;
   onAddArrangement: (arrangement: ArrangementItem) => void;
@@ -3865,9 +3891,6 @@ function ArrangementsScreen({
               value={timeFilter}
               onChange={setTimeFilter}
             />
-            <p className="mt-1 text-xs leading-4 text-text-tertiary">
-              {t("arrangements.subtitle")}
-            </p>
             <div className="mt-3 grid grid-cols-2 gap-2">
               <FilterSelect
                 label={t("arrangements.filterPeople")}
@@ -3888,11 +3911,6 @@ function ArrangementsScreen({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">
         <section className="space-y-3">
-          {!showPendingBox && isDailyReviewing && (
-            <p className="rounded-[14px] bg-primary-soft px-4 py-3 text-xs leading-4 text-primary">
-              正在复盘聊天，寻找可更新的安排...
-            </p>
-          )}
           {!showPendingBox && dailyReviewSuggestion && dailyReviewArrangement && (
             <ArrangementDailyReviewCard
               arrangement={dailyReviewArrangement}
@@ -3900,11 +3918,6 @@ function ArrangementsScreen({
               onConfirm={onConfirmDailyReviewSuggestion}
               onCancel={onCancelDailyReviewSuggestion}
             />
-          )}
-          {!showPendingBox && dailyReviewMessage && !dailyReviewSuggestion && (
-            <p className="rounded-[14px] bg-primary-soft px-4 py-3 text-xs leading-4 text-primary">
-              {dailyReviewMessage}
-            </p>
           )}
           {(showPendingBox
             ? sortedPendingBoxArrangements
@@ -4007,15 +4020,20 @@ function CalendarDateFilter({
     [dates]
   );
   const expandedDates = React.useMemo(() => {
-    const compactDateValues = new Set(compactDates.map((date) => date.value));
-    return [
-      ...compactDates,
-      ...dates.filter((date) => !compactDateValues.has(date.value)),
-    ];
-  }, [compactDates, dates]);
+    return dates;
+  }, [dates]);
   const visibleDates = mode === "compact" ? compactDates : expandedDates;
   const compactMode = mode === "compact";
   const expandedMode = mode === "expanded";
+  const monthTitle = React.useMemo(() => {
+    const firstDate = dates[0];
+    if (!firstDate) return "";
+    const parsedDate = new Date(`${firstDate.value}T00:00:00`);
+    if (!Number.isFinite(parsedDate.getTime())) return "";
+    return new Intl.DateTimeFormat(resolvedLocale, { month: "long" }).format(
+      parsedDate
+    );
+  }, [dates, resolvedLocale]);
 
   const startGesture = (x: number, y: number) => {
     gestureStartRef.current = { x, y };
@@ -4029,6 +4047,11 @@ function CalendarDateFilter({
     gestureStartRef.current = null;
     const absX = Math.abs(deltaX);
     const absY = Math.abs(deltaY);
+    if (absY > 28 && absY > absX && deltaY < 0 && mode !== "compact") {
+      didSwipeRef.current = true;
+      setMode("compact");
+      return;
+    }
     if (absY > 28 && absY > absX && deltaY > 0) {
       didSwipeRef.current = true;
       setMode("expanded");
@@ -4046,6 +4069,12 @@ function CalendarDateFilter({
     const deltaY = y - gestureStartRef.current.y;
     const absX = Math.abs(deltaX);
     const absY = Math.abs(deltaY);
+    if (absY > 28 && absY > absX && deltaY < 0 && mode !== "compact") {
+      didSwipeRef.current = true;
+      gestureStartRef.current = null;
+      setMode("compact");
+      return;
+    }
     if (absY > 28 && absY > absX && deltaY > 0) {
       didSwipeRef.current = true;
       gestureStartRef.current = null;
@@ -4082,13 +4111,19 @@ function CalendarDateFilter({
         gestureStartRef.current = null;
       }}
     >
-      <div className="flex items-start gap-2 pb-1">
+      {monthTitle && (
+        <h2 className="mb-2 text-[13px] font-semibold leading-4 text-text">
+          {monthTitle}
+        </h2>
+      )}
+      <div className="flex items-start gap-1 pb-1">
         <button
           type="button"
           className={cn(
-            "flex h-12 w-12 shrink-0 items-center justify-center rounded-[12px] border text-xs font-semibold transition active:scale-[0.98]",
+            "flex h-6 items-center justify-center rounded-[8px] border text-[10px] font-semibold transition active:scale-[0.98]",
+            compactMode ? "min-w-0 flex-1" : "w-6 shrink-0",
             value === "all"
-              ? "border-primary bg-primary text-on-primary"
+              ? "border-primary bg-primary-soft text-primary"
               : "border-border bg-surface text-text"
           )}
           onClick={handleAllClick}
@@ -4098,8 +4133,8 @@ function CalendarDateFilter({
         </button>
         <div
           className={cn(
-            "min-w-0 flex-1 gap-2",
-            compactMode && "grid grid-cols-3",
+            "min-w-0 flex-1 gap-1",
+            compactMode && "flex-[3] flex",
             mode === "horizontal" &&
               "flex overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
             expandedMode && "grid grid-cols-6"
@@ -4122,16 +4157,17 @@ function CalendarDateFilter({
                 key={date.value}
                 type="button"
                 className={cn(
-                  "flex h-12 flex-col items-center justify-center rounded-[12px] border text-xs transition active:scale-[0.98]",
-                  compactMode ? "min-w-0 px-2" : "w-12 min-w-[48px] shrink-0 px-1",
+                  "flex h-6 flex-col items-center justify-center rounded-[8px] border text-[9px] transition active:scale-[0.98]",
+                  compactMode
+                    ? "min-w-0 flex-1 px-1"
+                    : "w-6 min-w-[24px] shrink-0 px-0",
                   getCalendarHeatClass(count),
-                  date.isToday && "border-primary text-primary",
-                  selected && "border-primary bg-primary text-on-primary"
+                  selected && "border-primary bg-primary-soft text-primary"
                 )}
                 onClick={() => handleDateClick(date.value)}
                 aria-label={`${date.value} ${count}`}
               >
-                <span className="text-[11px] leading-3 opacity-80">
+                <span className="text-[8px] leading-[9px] opacity-80">
                   {compactMode && relativeLabel
                     ? relativeLabel
                     : relativeLabel ??
@@ -4140,7 +4176,7 @@ function CalendarDateFilter({
                       }).format(new Date(`${date.value}T00:00:00`)) ||
                         date.weekday)}
                 </span>
-                <span className="mt-0.5 text-[15px] font-semibold leading-4">
+                <span className="text-[12px] font-semibold leading-[13px]">
                   {date.day}
                 </span>
               </button>
@@ -4899,8 +4935,19 @@ function getArrangementPreciseSortTime(
     : Number.POSITIVE_INFINITY;
 }
 
+function getArrangementStatusSortRank(status: ArrangementStatus) {
+  if (status === "pending") return 0;
+  if (status === "done") return 1;
+  return 2;
+}
+
 function sortArrangementsByStatusImportanceDate(items: ArrangementItem[]) {
   return [...items].sort((left, right) => {
+    const statusRankDiff =
+      getArrangementStatusSortRank(left.status) -
+      getArrangementStatusSortRank(right.status);
+    if (statusRankDiff !== 0) return statusRankDiff;
+
     const leftPreciseTime = getArrangementPreciseSortTime(left);
     const rightPreciseTime = getArrangementPreciseSortTime(right);
     const leftHasPreciseTime = leftPreciseTime !== Number.POSITIVE_INFINITY;
