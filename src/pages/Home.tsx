@@ -13,8 +13,10 @@ import {
   persistAiArrangementConfig,
   persistArrangements,
   recognizeArrangement,
+  recognizeArrangementDailyUpdates,
   type AiArrangementConfig,
   type AiArrangementDraft,
+  type ArrangementDailyReviewSuggestion,
   type ArrangementContextRef,
   type ArrangementDraftInput,
   type ArrangementImportance,
@@ -80,6 +82,7 @@ const tabs: TabItem[] = [
 const aiConversationReadCountStorageKey = "arkme-demo.aiConversationReadCount";
 const browserNotificationPromptedStorageKey = "arkme-demo.browserNotificationPrompted";
 const createdSelfRecordsStorageKey = "arkme-demo.selfRecords";
+const arrangementDailyReviewStorageKey = "arkme-demo.lastArrangementDailyReviewDate";
 const searchHistoryStorageKey = "arkme-demo.searchHistory";
 const aiConversationTotalCount = aiConversationLogEntries.length;
 const maxSearchHistoryCount = 4;
@@ -388,12 +391,17 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   );
   const [selfArrangementDraft, setSelfArrangementDraft] =
     React.useState<AiArrangementDraft | null>(null);
+  const [dailyReviewSuggestion, setDailyReviewSuggestion] =
+    React.useState<ArrangementDailyReviewSuggestion | null>(null);
+  const [dailyReviewMessage, setDailyReviewMessage] = React.useState("");
+  const [isDailyReviewing, setIsDailyReviewing] = React.useState(false);
   const [editingSelfArrangementDraft, setEditingSelfArrangementDraft] =
     React.useState<AiArrangementDraft | null>(null);
   const [selfArrangementMessage, setSelfArrangementMessage] = React.useState("");
   const [recognizingSelfArrangementUid, setRecognizingSelfArrangementUid] =
     React.useState<string | null>(null);
   const lastAutoRecognizedSelfUidRef = React.useRef<string | null>(null);
+  const dailyReviewAttemptDateRef = React.useRef<string | null>(null);
   const initializedBrowserNotificationMessagesRef = React.useRef(false);
   const browserNotifiedMessageIdsRef = React.useRef<Set<string>>(new Set());
 
@@ -1021,6 +1029,97 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     ]
   );
 
+  const runDailyArrangementReview = React.useCallback(
+    async (reviewDate: string) => {
+      if (dailyReviewAttemptDateRef.current === reviewDate) return;
+      dailyReviewAttemptDateRef.current = reviewDate;
+
+      const reviewableArrangements = arrangements.filter(
+        (arrangement) => arrangement.status === "pending"
+      );
+      if (reviewableArrangements.length === 0) {
+        window.localStorage.setItem(arrangementDailyReviewStorageKey, reviewDate);
+        return;
+      }
+
+      const selfContextRefs = selfRecords.map(makeSelfArrangementContextRef);
+      const testContextRefs = testConversationSummaries.flatMap((summary) =>
+        summary.records.map((record) => makeTestArrangementContextRef(summary, record))
+      );
+      const dailyContextRefs = [...selfContextRefs, ...testContextRefs].sort(
+        (left, right) => left.sentAt - right.sentAt
+      );
+      if (dailyContextRefs.length === 0) {
+        window.localStorage.setItem(arrangementDailyReviewStorageKey, reviewDate);
+        return;
+      }
+
+      setDailyReviewMessage("");
+      setIsDailyReviewing(true);
+      try {
+        const inputText = [
+          `Review date: ${reviewDate}`,
+          "Reviewable arrangements:",
+          ...reviewableArrangements.map((arrangement) =>
+            [
+              `- id: ${arrangement.id}`,
+              `  title: ${arrangement.title}`,
+              `  description: ${arrangement.description || "无"}`,
+              `  people: ${arrangement.people.join("、") || "无"}`,
+              `  place: ${arrangement.place || "无"}`,
+              `  scheduledDate: ${arrangement.scheduledDate ?? "无"}`,
+              `  scheduledAt: ${arrangement.scheduledAt ?? "无"}`,
+            ].join("\n")
+          ),
+          "Chat messages:",
+          ...dailyContextRefs.map(
+            (ref) =>
+              `[${ref.conversationId}::${ref.messageId}] ${new Date(
+                ref.sentAt
+              ).toISOString()} | ${ref.conversationTitle} | ${ref.senderName}: ${
+                ref.text
+              }`
+          ),
+        ].join("\n");
+        const suggestions = await recognizeArrangementDailyUpdates(
+          arrangementAiConfig,
+          inputText,
+          reviewableArrangements,
+          dailyContextRefs
+        );
+        window.localStorage.setItem(arrangementDailyReviewStorageKey, reviewDate);
+        setDailyReviewSuggestion(suggestions[0] ?? null);
+        setDailyReviewMessage(
+          suggestions[0] ? "AI 发现一条安排更新，等待确认" : ""
+        );
+      } catch (error) {
+        setDailyReviewMessage(
+          error instanceof Error ? error.message : t("arrangements.aiFailed")
+        );
+      } finally {
+        setIsDailyReviewing(false);
+      }
+    },
+    [
+      arrangementAiConfig,
+      arrangements,
+      makeSelfArrangementContextRef,
+      makeTestArrangementContextRef,
+      selfRecords,
+      t,
+      testConversationSummaries,
+    ]
+  );
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const todayValue = formatLocalDateValue(new Date(currentTime));
+    const lastReviewDate =
+      window.localStorage.getItem(arrangementDailyReviewStorageKey) ?? "";
+    if (lastReviewDate >= todayValue) return;
+    void runDailyArrangementReview(todayValue);
+  }, [currentTime, runDailyArrangementReview]);
+
   React.useEffect(() => {
     if (!showSendToSelf || !latestSelfRecord) return;
     if (lastAutoRecognizedSelfUidRef.current === latestSelfRecord.uid) return;
@@ -1042,6 +1141,45 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     setSelfArrangementDraft(null);
     setSelfArrangementMessage(t("arrangements.confirmed"));
   }, [selfArrangementDraft, t, updateArrangements]);
+
+  const confirmDailyReviewSuggestion = React.useCallback(() => {
+    if (!dailyReviewSuggestion) return;
+    const updateDate = new Date().toLocaleDateString("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    updateArrangements((prev) =>
+      prev.map((arrangement) => {
+        if (arrangement.id !== dailyReviewSuggestion.arrangementId) return arrangement;
+        const existingContextIds = new Set(
+          arrangement.contextRefs.map((ref) => `${ref.conversationId}::${ref.messageId}`)
+        );
+        const mergedContextRefs = [
+          ...arrangement.contextRefs,
+          ...dailyReviewSuggestion.contextRefs.filter(
+            (ref) => !existingContextIds.has(`${ref.conversationId}::${ref.messageId}`)
+          ),
+        ];
+        const appendText = `${updateDate} 聊天更新：${dailyReviewSuggestion.appendDescription}`;
+        return {
+          ...arrangement,
+          description: arrangement.description
+            ? `${arrangement.description}\n${appendText}`
+            : appendText,
+          contextRefs: mergedContextRefs,
+          updatedAt: Date.now(),
+        };
+      })
+    );
+    setDailyReviewSuggestion(null);
+    setDailyReviewMessage("安排更新已确认");
+  }, [dailyReviewSuggestion, updateArrangements]);
+
+  const cancelDailyReviewSuggestion = React.useCallback(() => {
+    setDailyReviewSuggestion(null);
+    setDailyReviewMessage("");
+  }, []);
 
   const saveEditingSelfArrangementDraft = React.useCallback(
     (nextDraft: ArrangementDraftInput) => {
@@ -1516,6 +1654,9 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           arrangements={arrangements}
           aiConfig={arrangementAiConfig}
           contextRefs={arrangementContextRefs}
+          dailyReviewSuggestion={dailyReviewSuggestion}
+          dailyReviewMessage={dailyReviewMessage}
+          isDailyReviewing={isDailyReviewing}
           openArrangementId={arrangementToOpenId}
           onOpenedArrangement={() => setArrangementToOpenId(null)}
           onAddArrangement={(arrangement) =>
@@ -1533,6 +1674,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
             }
             openTestConversation(ref.conversationId, `test-${ref.messageId}`);
           }}
+          onConfirmDailyReviewSuggestion={confirmDailyReviewSuggestion}
+          onCancelDailyReviewSuggestion={cancelDailyReviewSuggestion}
         />
       );
     }
@@ -3209,20 +3352,30 @@ function ArrangementsScreen({
   arrangements,
   aiConfig,
   contextRefs,
+  dailyReviewSuggestion,
+  dailyReviewMessage,
+  isDailyReviewing,
   openArrangementId,
   onOpenedArrangement,
   onAddArrangement,
   onUpdateArrangement,
   onOpenContext,
+  onConfirmDailyReviewSuggestion,
+  onCancelDailyReviewSuggestion,
 }: {
   arrangements: ArrangementItem[];
   aiConfig: AiArrangementConfig;
   contextRefs: ArrangementContextRef[];
+  dailyReviewSuggestion: ArrangementDailyReviewSuggestion | null;
+  dailyReviewMessage: string;
+  isDailyReviewing: boolean;
   openArrangementId?: string | null;
   onOpenedArrangement?: () => void;
   onAddArrangement: (arrangement: ArrangementItem) => void;
   onUpdateArrangement: (arrangement: ArrangementItem) => void;
   onOpenContext: (ref: ArrangementContextRef) => void;
+  onConfirmDailyReviewSuggestion: () => void;
+  onCancelDailyReviewSuggestion: () => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
   const [peopleFilter, setPeopleFilter] = React.useState("all");
@@ -3339,6 +3492,14 @@ function ArrangementsScreen({
   const sortedPendingBoxArrangements = React.useMemo(
     () => sortArrangementsByStatusImportanceDate(pendingBoxArrangements),
     [pendingBoxArrangements]
+  );
+  const dailyReviewArrangement = React.useMemo(
+    () =>
+      dailyReviewSuggestion
+        ? arrangements.find((arrangement) => arrangement.id === dailyReviewSuggestion.arrangementId) ??
+          null
+        : null,
+    [arrangements, dailyReviewSuggestion]
   );
 
   const resetManualForm = () => {
@@ -3727,6 +3888,24 @@ function ArrangementsScreen({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">
         <section className="space-y-3">
+          {!showPendingBox && isDailyReviewing && (
+            <p className="rounded-[14px] bg-primary-soft px-4 py-3 text-xs leading-4 text-primary">
+              正在复盘聊天，寻找可更新的安排...
+            </p>
+          )}
+          {!showPendingBox && dailyReviewSuggestion && dailyReviewArrangement && (
+            <ArrangementDailyReviewCard
+              arrangement={dailyReviewArrangement}
+              suggestion={dailyReviewSuggestion}
+              onConfirm={onConfirmDailyReviewSuggestion}
+              onCancel={onCancelDailyReviewSuggestion}
+            />
+          )}
+          {!showPendingBox && dailyReviewMessage && !dailyReviewSuggestion && (
+            <p className="rounded-[14px] bg-primary-soft px-4 py-3 text-xs leading-4 text-primary">
+              {dailyReviewMessage}
+            </p>
+          )}
           {(showPendingBox
             ? sortedPendingBoxArrangements
             : sortedArrangements
@@ -4197,6 +4376,60 @@ function ArrangementChip({ label }: { label: string }) {
   );
 }
 
+function ArrangementDailyReviewCard({
+  arrangement,
+  suggestion,
+  onConfirm,
+  onCancel,
+}: {
+  arrangement: ArrangementItem;
+  suggestion: ArrangementDailyReviewSuggestion;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <section className="rounded-[14px] border border-primary/25 bg-primary-soft px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold leading-4 text-primary">
+            AI 发现可更新的安排
+          </p>
+          <h2 className="mt-1 line-clamp-1 text-[15px] font-semibold leading-5 text-text">
+            {arrangement.title}
+          </h2>
+        </div>
+        <span className="shrink-0 rounded-full bg-bg px-2 py-1 text-[11px] text-text-tertiary">
+          {Math.round(suggestion.confidence * 100)}%
+        </span>
+      </div>
+      <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-text">
+        {suggestion.appendDescription}
+      </p>
+      {suggestion.reason && (
+        <p className="mt-1 text-[11px] leading-4 text-text-tertiary">
+          {suggestion.reason}
+        </p>
+      )}
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          className="h-9 rounded-[10px] bg-primary text-xs font-semibold text-on-primary transition active:scale-[0.98]"
+          onClick={onConfirm}
+        >
+          确认更新
+        </button>
+        <button
+          type="button"
+          className="h-9 rounded-[10px] border border-border bg-bg text-xs font-semibold text-text transition active:scale-[0.98]"
+          onClick={onCancel}
+        >
+          取消
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ArrangementConfirmationCard({
   draft,
   onConfirm,
@@ -4653,23 +4886,40 @@ function getArrangementSortDate(
   return Number.isFinite(parsedTime) ? parsedTime : Number.POSITIVE_INFINITY;
 }
 
+function getArrangementPreciseSortTime(
+  arrangement: Pick<ArrangementItem, "scheduledAt">
+) {
+  return typeof arrangement.scheduledAt === "number" &&
+    Number.isFinite(arrangement.scheduledAt)
+    ? arrangement.scheduledAt
+    : Number.POSITIVE_INFINITY;
+}
+
 function sortArrangementsByStatusImportanceDate(items: ArrangementItem[]) {
   return [...items].sort((left, right) => {
-    const statusOrder: Record<ArrangementStatus, number> = {
-      pending: 0,
-      later: 1,
-      done: 2,
-    };
-    if (statusOrder[left.status] !== statusOrder[right.status]) {
-      return statusOrder[left.status] - statusOrder[right.status];
+    const leftPreciseTime = getArrangementPreciseSortTime(left);
+    const rightPreciseTime = getArrangementPreciseSortTime(right);
+    const leftHasPreciseTime = leftPreciseTime !== Number.POSITIVE_INFINITY;
+    const rightHasPreciseTime = rightPreciseTime !== Number.POSITIVE_INFINITY;
+    if (leftHasPreciseTime !== rightHasPreciseTime) {
+      return leftHasPreciseTime ? -1 : 1;
     }
-    if (right.importance !== left.importance) {
-      return right.importance - left.importance;
+    if (leftHasPreciseTime && rightHasPreciseTime) {
+      if (leftPreciseTime !== rightPreciseTime) {
+        return leftPreciseTime - rightPreciseTime;
+      }
+      if (right.importance !== left.importance) {
+        return right.importance - left.importance;
+      }
+      return right.updatedAt - left.updatedAt;
     }
     const leftDate = getArrangementSortDate(left);
     const rightDate = getArrangementSortDate(right);
     if (leftDate !== rightDate) {
       return leftDate - rightDate;
+    }
+    if (right.importance !== left.importance) {
+      return right.importance - left.importance;
     }
     return right.updatedAt - left.updatedAt;
   });

@@ -63,6 +63,14 @@ export type ArrangementDraftInput = {
   source: ArrangementSource;
 };
 
+export type ArrangementDailyReviewSuggestion = {
+  arrangementId: string;
+  appendDescription: string;
+  confidence: number;
+  reason: string;
+  contextRefs: ArrangementContextRef[];
+};
+
 export const arrangementsStorageKey = "arkme-demo.arrangements.v1";
 export const arrangementAiConfigStorageKey = "arkme-demo.arrangementAiConfig.v1";
 
@@ -421,6 +429,48 @@ function normalizeAiDraft(
   };
 }
 
+function normalizeDailyReviewSuggestion(
+  value: unknown,
+  arrangements: Array<Pick<ArrangementItem, "id">>,
+  contextRefs: ArrangementContextRef[]
+): ArrangementDailyReviewSuggestion | null {
+  if (!value || typeof value !== "object") return null;
+
+  const suggestion = value as Partial<ArrangementDailyReviewSuggestion>;
+  const arrangementId = normalizeText(suggestion.arrangementId);
+  if (!arrangements.some((arrangement) => arrangement.id === arrangementId)) {
+    return null;
+  }
+  const appendDescription = normalizeText(suggestion.appendDescription);
+  if (!appendDescription) return null;
+
+  const contextIds = Array.isArray(suggestion.contextRefs)
+    ? suggestion.contextRefs
+        .map((item) => {
+          if (!item || typeof item !== "object") return "";
+          const ref = item as Partial<ArrangementContextRef>;
+          return `${normalizeText(ref.conversationId)}::${normalizeText(ref.messageId)}`;
+        })
+        .filter(Boolean)
+    : [];
+  const selectedContextRefs = contextIds.length
+    ? contextRefs.filter((ref) =>
+        contextIds.includes(`${ref.conversationId}::${ref.messageId}`)
+      )
+    : [];
+
+  return {
+    arrangementId,
+    appendDescription,
+    confidence:
+      typeof suggestion.confidence === "number" && Number.isFinite(suggestion.confidence)
+        ? Math.max(0, Math.min(1, suggestion.confidence))
+        : 0.7,
+    reason: normalizeText(suggestion.reason),
+    contextRefs: selectedContextRefs,
+  };
+}
+
 async function readAiErrorMessage(response: Response) {
   try {
     const payload = (await response.json()) as {
@@ -594,6 +644,93 @@ export async function recognizeArrangement(
     if (error instanceof Error) throw error;
     throw new Error("AI 返回内容无法解析为安排");
   }
+}
+
+export async function recognizeArrangementDailyUpdates(
+  config: AiArrangementConfig,
+  content: string,
+  arrangements: Array<
+    Pick<
+      ArrangementItem,
+      "id" | "title" | "description" | "people" | "place" | "scheduledDate" | "scheduledAt"
+    >
+  >,
+  contextRefs: ArrangementContextRef[]
+): Promise<ArrangementDailyReviewSuggestion[]> {
+  const normalizedContent = content.trim();
+  if (!normalizedContent || arrangements.length === 0 || contextRefs.length === 0) {
+    return [];
+  }
+  if (!config.baseUrl.trim() || !config.apiKey.trim() || !config.model.trim()) {
+    throw new Error("请先在设置中填写 AI Base URL、API Key 和模型名");
+  }
+
+  const abortController = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    abortController.abort();
+  }, aiRecognitionTimeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(buildChatCompletionsUrl(config.baseUrl), {
+      method: "POST",
+      signal: abortController.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.apiKey.trim()}`,
+      },
+      body: JSON.stringify({
+        model: config.model.trim(),
+        temperature: 0.6,
+        max_tokens: 720,
+        stream: true,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是安排复盘助手。只返回紧凑 JSON。根据聊天内容判断是否有新信息可以更新已有安排。不要创建新安排，不要更新已完成或待定安排。没有可靠更新时返回空 suggestions。",
+          },
+          {
+            role: "user",
+            content:
+              "返回格式：{\"suggestions\":[{\"arrangementId\":\"...\",\"appendDescription\":\"...\",\"confidence\":0.8,\"reason\":\"...\",\"contextRefs\":[{\"conversationId\":\"...\",\"messageId\":\"...\"}]}]}。\n" +
+              "appendDescription 只写需要追加到安排描述的新事实，比如检查结果、对方补充信息、地点变更等；不要重复安排已有描述。\n" +
+              normalizedContent,
+          },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("AI 每日复盘超时，请稍后重试或切换更快的模型");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    const detail = await readAiErrorMessage(response);
+    throw new Error(getAiHttpErrorMessage(response.status, detail));
+  }
+
+  const contentText = await readStreamingAiContent(response);
+  if (!contentText) return [];
+
+  const parsedValue = JSON.parse(extractJsonObject(contentText)) as {
+    suggestions?: unknown[];
+  };
+  const suggestions = Array.isArray(parsedValue.suggestions)
+    ? parsedValue.suggestions
+    : [];
+  return suggestions
+    .map((suggestion) =>
+      normalizeDailyReviewSuggestion(suggestion, arrangements, contextRefs)
+    )
+    .filter((suggestion): suggestion is ArrangementDailyReviewSuggestion =>
+      Boolean(suggestion)
+    );
 }
 
 export function createArrangementFromDraft(
