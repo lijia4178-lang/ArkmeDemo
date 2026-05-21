@@ -387,6 +387,14 @@ function extractJsonObject(content: string) {
   return source.slice(start, end + 1);
 }
 
+function parseAiJsonContent(content: string): unknown {
+  try {
+    return JSON.parse(extractJsonObject(content));
+  } catch {
+    throw new Error(buildAiJsonErrorMessage(content));
+  }
+}
+
 function normalizeAiDraft(
   value: unknown,
   source: Exclude<ArrangementSource, "manual">,
@@ -483,72 +491,148 @@ async function readAiErrorMessage(response: Response) {
   }
 }
 
-async function readStreamingAiContent(response: Response) {
-  if (!response.body) {
-    throw new Error("AI 未返回可读取的流式内容");
+function getObjectValue(value: unknown, key: string) {
+  if (!value || typeof value !== "object") return undefined;
+  return (value as Record<string, unknown>)[key];
+}
+
+function readTextContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item;
+      return (
+        normalizeText(getObjectValue(item, "text")) ||
+        normalizeText(getObjectValue(item, "content"))
+      );
+    })
+    .filter(Boolean)
+    .join("");
+}
+
+function shouldReadTextForKey(key: string) {
+  return (
+    key === "content" ||
+    key === "delta" ||
+    key === "output_text" ||
+    key === "text"
+  );
+}
+
+function collectAiTextFragments(value: unknown, keyHint = ""): string[] {
+  if (typeof value === "string") {
+    return shouldReadTextForKey(keyHint) ? [value] : [];
   }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectAiTextFragments(item, keyHint));
+  }
+
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  if (isDirectAiJsonPayload(value)) {
+    return [JSON.stringify(value)];
+  }
+
+  const objectValue = value as Record<string, unknown>;
+  const preferredKeys = [
+    "output_text",
+    "content",
+    "text",
+    "delta",
+    "message",
+    "output",
+    "choices",
+  ];
+
+  return preferredKeys.flatMap((key) =>
+    key in objectValue ? collectAiTextFragments(objectValue[key], key) : []
+  );
+}
+
+function extractAiContentFromPayload(payload: unknown): string {
+  if (isDirectAiJsonPayload(payload)) return JSON.stringify(payload);
+
+  const outputText = normalizeText(getObjectValue(payload, "output_text"));
+  if (outputText) return outputText;
+
+  const choices = getObjectValue(payload, "choices");
+  if (Array.isArray(choices)) {
+    return choices
+      .map((choice) => {
+        const deltaContent = readTextContent(
+          getObjectValue(getObjectValue(choice, "delta"), "content")
+        );
+        const messageContent = readTextContent(
+          getObjectValue(getObjectValue(choice, "message"), "content")
+        );
+        const textContent = readTextContent(getObjectValue(choice, "text"));
+        return deltaContent || messageContent || textContent;
+      })
+      .filter(Boolean)
+      .join("");
+  }
+
+  return (
+    readTextContent(getObjectValue(payload, "content")) ||
+    collectAiTextFragments(payload).join("")
+  );
+}
+
+function isDirectAiJsonPayload(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+  const objectPayload = payload as Record<string, unknown>;
+  return "title" in objectPayload || "suggestions" in objectPayload;
+}
+
+async function readAiResponseContent(response: Response) {
+  if (!response.body) {
+    throw new Error("AI 未返回可读取的响应内容");
+  }
+
+  const rawText = (await response.text()).trim();
+  if (!rawText) return "";
+
+  try {
+    const payload = JSON.parse(rawText) as unknown;
+    const content = extractAiContentFromPayload(payload);
+    if (content.trim()) return content.trim();
+    if (isDirectAiJsonPayload(payload)) return JSON.stringify(payload);
+  } catch {
+    // Fall through to SSE parsing for OpenAI-compatible streaming responses.
+  }
+
   let content = "";
 
-  let streamDone = false;
-  while (!streamDone) {
-    const { done, value } = await reader.read();
-    streamDone = done;
-    if (!value) continue;
+  for (const line of rawText.split(/\r?\n/)) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine.startsWith("data:")) continue;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
+    const data = trimmedLine.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
 
-    for (const line of lines) {
-      const trimmedLine = line.trim();
-      if (!trimmedLine.startsWith("data:")) continue;
-
-      const data = trimmedLine.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-
-      try {
-        const chunk = JSON.parse(data) as {
-          choices?: Array<{
-            delta?: { content?: string };
-            message?: { content?: string };
-          }>;
-        };
-        content +=
-          chunk.choices?.[0]?.delta?.content ??
-          chunk.choices?.[0]?.message?.content ??
-          "";
-      } catch {
-        // Ignore malformed keep-alive chunks from OpenAI-compatible gateways.
-      }
-    }
-  }
-
-  const tail = buffer.trim();
-  if (tail.startsWith("data:")) {
-    const data = tail.slice(5).trim();
-    if (data && data !== "[DONE]") {
-      try {
-        const chunk = JSON.parse(data) as {
-          choices?: Array<{
-            delta?: { content?: string };
-            message?: { content?: string };
-          }>;
-        };
-        content +=
-          chunk.choices?.[0]?.delta?.content ??
-          chunk.choices?.[0]?.message?.content ??
-          "";
-      } catch {
-        // Ignore malformed final chunks.
-      }
+    try {
+      const chunk = JSON.parse(data) as unknown;
+      content += extractAiContentFromPayload(chunk);
+    } catch {
+      // Ignore malformed keep-alive chunks from OpenAI-compatible gateways.
     }
   }
 
   return content.trim();
+}
+
+function buildAiJsonErrorMessage(content: string) {
+  const preview = content.trim().replace(/\s+/g, " ").slice(0, 160);
+  return preview
+    ? `AI 未返回有效 JSON 内容：${preview}`
+    : "AI 未返回有效 JSON 内容";
 }
 
 function getAiHttpErrorMessage(status: number, detail: string) {
@@ -629,21 +713,12 @@ export async function recognizeArrangement(
     throw new Error(getAiHttpErrorMessage(response.status, detail));
   }
 
-  const contentText = await readStreamingAiContent(response);
+  const contentText = await readAiResponseContent(response);
   if (!contentText) {
-    throw new Error("AI 未返回可解析内容");
+    throw new Error("AI 未返回有效 JSON 内容");
   }
 
-  try {
-    return normalizeAiDraft(
-      JSON.parse(extractJsonObject(contentText)),
-      source,
-      contextRefs
-    );
-  } catch (error) {
-    if (error instanceof Error) throw error;
-    throw new Error("AI 返回内容无法解析为安排");
-  }
+  return normalizeAiDraft(parseAiJsonContent(contentText), source, contextRefs);
 }
 
 export async function recognizeArrangementDailyUpdates(
@@ -715,10 +790,12 @@ export async function recognizeArrangementDailyUpdates(
     throw new Error(getAiHttpErrorMessage(response.status, detail));
   }
 
-  const contentText = await readStreamingAiContent(response);
-  if (!contentText) return [];
+  const contentText = await readAiResponseContent(response);
+  if (!contentText) {
+    throw new Error("AI 未返回有效 JSON 内容");
+  }
 
-  const parsedValue = JSON.parse(extractJsonObject(contentText)) as {
+  const parsedValue = parseAiJsonContent(contentText) as {
     suggestions?: unknown[];
   };
   const suggestions = Array.isArray(parsedValue.suggestions)

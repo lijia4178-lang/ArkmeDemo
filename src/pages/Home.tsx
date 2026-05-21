@@ -4060,11 +4060,13 @@ function CalendarDateFilter({
   };
 
   const handleDateClick = (dateValue: string) => {
-    if (didSwipeRef.current) {
-      didSwipeRef.current = false;
-      return;
-    }
-    onChange(value === dateValue ? "all" : dateValue);
+    didSwipeRef.current = false;
+    onChange(dateValue);
+  };
+
+  const handleAllClick = () => {
+    didSwipeRef.current = false;
+    onChange("all");
   };
 
   return (
@@ -4072,7 +4074,6 @@ function CalendarDateFilter({
       aria-label={t("arrangements.filterTime")}
       className="mt-3"
       onPointerDown={(event) => {
-        event.currentTarget.setPointerCapture(event.pointerId);
         startGesture(event.clientX, event.clientY);
       }}
       onPointerMove={(event) => updateGesture(event.clientX, event.clientY)}
@@ -4080,69 +4081,72 @@ function CalendarDateFilter({
       onPointerCancel={() => {
         gestureStartRef.current = null;
       }}
-      onTouchStart={(event) => {
-        const touch = event.touches[0];
-        if (touch) startGesture(touch.clientX, touch.clientY);
-      }}
-      onTouchMove={(event) => {
-        const touch = event.touches[0];
-        if (touch) updateGesture(touch.clientX, touch.clientY);
-      }}
-      onTouchEnd={(event) => {
-        const touch = event.changedTouches[0];
-        if (touch) finishGesture(touch.clientX, touch.clientY);
-      }}
     >
-      <div
-        className={cn(
-          "gap-2 pb-1",
-          compactMode && "grid grid-cols-3",
-          mode === "horizontal" &&
-            "flex overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
-          expandedMode && "grid grid-cols-7"
-        )}
-      >
-        {visibleDates.map((date) => {
-          const count = countByDate.get(date.value) ?? 0;
-          const selected = value === date.value;
-          const relation = getRelativeDateIndex(date.value);
-          const relativeLabel =
-            relation === 0
-              ? t("arrangements.today")
-              : relation === 1
-                ? t("arrangements.tomorrow")
-                : relation === 2
-                  ? t("arrangements.dayAfterTomorrow")
-                  : null;
-          return (
-            <button
-              key={date.value}
-              type="button"
-              className={cn(
-                "flex h-12 flex-col items-center justify-center rounded-[12px] border text-xs transition active:scale-[0.98]",
-                compactMode ? "min-w-0 px-2" : "w-12 min-w-[48px] shrink-0 px-1",
-                getCalendarHeatClass(count),
-                date.isToday && "border-primary text-primary",
-                selected && "border-primary bg-primary text-on-primary"
-              )}
-              onClick={() => handleDateClick(date.value)}
-              aria-label={`${date.value} ${count}`}
-            >
-              <span className="text-[11px] leading-3 opacity-80">
-                {compactMode && relativeLabel
-                  ? relativeLabel
-                  : relativeLabel ??
-                    (new Intl.DateTimeFormat(resolvedLocale, {
-                      weekday: "narrow",
-                    }).format(new Date(`${date.value}T00:00:00`)) ||
-                      date.weekday)}
-              </span>
-              <span className="mt-0.5 text-[15px] font-semibold leading-4">
-                {date.day}
-              </span>
-            </button>
-          );
-        })}
+      <div className="flex items-start gap-2 pb-1">
+        <button
+          type="button"
+          className={cn(
+            "flex h-12 w-12 shrink-0 items-center justify-center rounded-[12px] border text-xs font-semibold transition active:scale-[0.98]",
+            value === "all"
+              ? "border-primary bg-primary text-on-primary"
+              : "border-border bg-surface text-text"
+          )}
+          onClick={handleAllClick}
+          aria-label={t("arrangements.all")}
+        >
+          {t("arrangements.all")}
+        </button>
+        <div
+          className={cn(
+            "min-w-0 flex-1 gap-2",
+            compactMode && "grid grid-cols-3",
+            mode === "horizontal" &&
+              "flex overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+            expandedMode && "grid grid-cols-6"
+          )}
+        >
+          {visibleDates.map((date) => {
+            const count = countByDate.get(date.value) ?? 0;
+            const selected = value === date.value;
+            const relation = getRelativeDateIndex(date.value);
+            const relativeLabel =
+              relation === 0
+                ? t("arrangements.today")
+                : relation === 1
+                  ? t("arrangements.tomorrow")
+                  : relation === 2
+                    ? t("arrangements.dayAfterTomorrow")
+                    : null;
+            return (
+              <button
+                key={date.value}
+                type="button"
+                className={cn(
+                  "flex h-12 flex-col items-center justify-center rounded-[12px] border text-xs transition active:scale-[0.98]",
+                  compactMode ? "min-w-0 px-2" : "w-12 min-w-[48px] shrink-0 px-1",
+                  getCalendarHeatClass(count),
+                  date.isToday && "border-primary text-primary",
+                  selected && "border-primary bg-primary text-on-primary"
+                )}
+                onClick={() => handleDateClick(date.value)}
+                aria-label={`${date.value} ${count}`}
+              >
+                <span className="text-[11px] leading-3 opacity-80">
+                  {compactMode && relativeLabel
+                    ? relativeLabel
+                    : relativeLabel ??
+                      (new Intl.DateTimeFormat(resolvedLocale, {
+                        weekday: "narrow",
+                      }).format(new Date(`${date.value}T00:00:00`)) ||
+                        date.weekday)}
+                </span>
+                <span className="mt-0.5 text-[15px] font-semibold leading-4">
+                  {date.day}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </section>
   );
