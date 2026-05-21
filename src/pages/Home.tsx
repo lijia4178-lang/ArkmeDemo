@@ -896,6 +896,29 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     [candidateProfile?.name, t]
   );
 
+  const makeTestArrangementContextRef = React.useCallback(
+    (
+      summary: TestConversationSummary,
+      record: TestConversationRecord
+    ): ArrangementContextRef => {
+      const senderName =
+        record.sender === "demo"
+          ? candidateProfile?.name || t("recordDetail.me")
+          : summary.memberIdentities.find((identity) => identity.id === record.identityId)
+              ?.name ?? summary.title;
+      return {
+        conversationId: summary.conversationId,
+        messageId: record.uid.replace(/^test-/, ""),
+        conversationType: summary.conversationType,
+        senderName,
+        conversationTitle: summary.title,
+        text: record.text_content,
+        sentAt: record.send_at,
+      };
+    },
+    [candidateProfile?.name, t]
+  );
+
   const recognizeSelfRecordAsArrangement = React.useCallback(
     async (record: RecordItem, mode: "auto" | "manual") => {
       if (!record.text_content.trim()) return;
@@ -934,6 +957,65 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     [
       arrangementAiConfig,
       makeSelfArrangementContextRef,
+      recognizingSelfArrangementUid,
+      t,
+    ]
+  );
+
+  const recognizeTestRecordAsArrangement = React.useCallback(
+    async (summary: TestConversationSummary, record: TestConversationRecord) => {
+      if (!record.text_content.trim()) return;
+      if (recognizingSelfArrangementUid) return;
+
+      setSelfArrangementMessage("");
+      setRecognizingSelfArrangementUid(record.uid);
+      try {
+        const sortedRecords = [...summary.records].sort((a, b) => a.send_at - b.send_at);
+        const anchorIndex = sortedRecords.findIndex((item) => item.uid === record.uid);
+        const safeAnchorIndex = anchorIndex >= 0 ? anchorIndex : 0;
+        const contextRecords = sortedRecords.slice(
+          Math.max(0, safeAnchorIndex - 10),
+          safeAnchorIndex + 11
+        );
+        const contextRefs = contextRecords.map((item) =>
+          makeTestArrangementContextRef(summary, item)
+        );
+        const anchorRef =
+          contextRefs.find((item) => item.messageId === record.uid.replace(/^test-/, "")) ??
+          makeTestArrangementContextRef(summary, record);
+        const inputText = [
+          `Conversation: ${summary.title}`,
+          `Conversation type: ${summary.conversationType}`,
+          `Anchor message sender: ${anchorRef.senderName}`,
+          `Anchor message local time: ${new Date(record.send_at).toLocaleString("zh-CN", {
+            hour12: false,
+          })}`,
+          "Context messages, oldest to newest:",
+          ...contextRefs.map((item) => {
+            const marker = item.messageId === anchorRef.messageId ? "ANCHOR" : "CONTEXT";
+            return `[${marker}] ${new Date(item.sentAt).toISOString()} | ${item.senderName}: ${
+              item.text
+            }`;
+          }),
+        ].join("\n");
+        const draft = await recognizeArrangement(
+          arrangementAiConfig,
+          inputText,
+          "ai-message",
+          contextRefs
+        );
+        setSelfArrangementDraft(draft);
+      } catch (error) {
+        setSelfArrangementMessage(
+          error instanceof Error ? error.message : t("arrangements.aiFailed")
+        );
+      } finally {
+        setRecognizingSelfArrangementUid(null);
+      }
+    },
+    [
+      arrangementAiConfig,
+      makeTestArrangementContextRef,
       recognizingSelfArrangementUid,
       t,
     ]
@@ -1380,6 +1462,17 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
           onCreateReply={(content) => createTestReply(activeTestConversationSummary, content)}
+          pendingArrangementDraft={selfArrangementDraft}
+          arrangementMessage={selfArrangementMessage}
+          recognizingArrangementUid={recognizingSelfArrangementUid}
+          onRecognizeRecord={(record) => {
+            void recognizeTestRecordAsArrangement(activeTestConversationSummary, record);
+          }}
+          onConfirmArrangement={confirmSelfArrangementDraft}
+          onCancelArrangement={cancelSelfArrangementDraft}
+          onEditArrangement={() => {
+            if (selfArrangementDraft) setEditingSelfArrangementDraft(selfArrangementDraft);
+          }}
         />
       );
     }
@@ -2713,6 +2806,13 @@ function TestIdentityConversationChat({
   onOpenRecordDetail,
   onOpenRecordSnapshot,
   onCreateReply,
+  pendingArrangementDraft,
+  arrangementMessage,
+  recognizingArrangementUid,
+  onRecognizeRecord,
+  onConfirmArrangement,
+  onCancelArrangement,
+  onEditArrangement,
 }: {
   summary: TestConversationSummary;
   targetUid?: string | null;
@@ -2720,6 +2820,13 @@ function TestIdentityConversationChat({
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
   onCreateReply: (content: string) => void;
+  pendingArrangementDraft: AiArrangementDraft | null;
+  arrangementMessage: string;
+  recognizingArrangementUid: string | null;
+  onRecognizeRecord: (record: TestConversationRecord) => void;
+  onConfirmArrangement: () => void;
+  onCancelArrangement: () => void;
+  onEditArrangement: () => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
   const candidateProfile = useCandidateProfile();
@@ -2730,6 +2837,7 @@ function TestIdentityConversationChat({
     () => [...summary.records].sort((a, b) => a.send_at - b.send_at),
     [summary.records]
   );
+  const canRecognizeArrangement = summary.conversationType === "private";
 
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
@@ -2818,7 +2926,36 @@ function TestIdentityConversationChat({
                       }
                       onOpenDetail={() => onOpenRecordDetail(record)}
                       onOpenMemorySnapshot={() => onOpenRecordSnapshot(record)}
+                      menuActions={
+                        canRecognizeArrangement
+                          ? [
+                              {
+                                label:
+                                  recognizingArrangementUid === record.uid
+                                    ? t("arrangements.recognizing")
+                                    : t("arrangements.recognizeSelf"),
+                                icon: "calendar",
+                                disabled: Boolean(recognizingArrangementUid),
+                                onClick: () => onRecognizeRecord(record),
+                              },
+                            ]
+                          : []
+                      }
                     />
+                    {canRecognizeArrangement && (
+                      <div className="flex justify-end px-4 pt-1.5">
+                        <button
+                          type="button"
+                          className="h-7 rounded-full border border-border bg-bg px-2.5 text-[11px] font-semibold text-text-tertiary transition hover:text-text active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => onRecognizeRecord(record)}
+                          disabled={Boolean(recognizingArrangementUid)}
+                        >
+                          {recognizingArrangementUid === record.uid
+                            ? t("arrangements.recognizing")
+                            : t("arrangements.recognizeSelf")}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="flex items-start gap-2.5">
@@ -2843,12 +2980,42 @@ function TestIdentityConversationChat({
                           {record.text_content}
                         </p>
                       </button>
+                      {canRecognizeArrangement && (
+                        <button
+                          type="button"
+                          className="mt-1.5 h-7 rounded-full border border-border bg-bg px-2.5 text-[11px] font-semibold text-text-tertiary transition hover:text-text active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => onRecognizeRecord(record)}
+                          disabled={Boolean(recognizingArrangementUid)}
+                        >
+                          {recognizingArrangementUid === record.uid
+                            ? t("arrangements.recognizing")
+                            : t("arrangements.recognizeSelf")}
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
               </div>
             );
           })}
+          {(pendingArrangementDraft || arrangementMessage) && canRecognizeArrangement && (
+            <div className="pt-1">
+              {pendingArrangementDraft && (
+                <ArrangementConfirmationCard
+                  draft={pendingArrangementDraft}
+                  onConfirm={onConfirmArrangement}
+                  onCancel={onCancelArrangement}
+                  onEdit={onEditArrangement}
+                  canConfirm={Boolean(pendingArrangementDraft.scheduledDate)}
+                />
+              )}
+              {arrangementMessage && (
+                <p className="mt-2 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
+                  {arrangementMessage}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
       <ChatInput
@@ -3514,7 +3681,7 @@ function ArrangementsScreen({
               onClick={() => setShowPendingBox(true)}
             >
               <span className="block truncate">
-                {t("arrangements.pendingBox")} {pendingBoxArrangements.length}
+                {t("arrangements.pendingBox")}
               </span>
             </button>
           </div>
@@ -3531,6 +3698,12 @@ function ArrangementsScreen({
         </div>
         {!showPendingBox && (
           <>
+            <CalendarDateFilter
+              dates={calendarDates}
+              countByDate={arrangementCountByDate}
+              value={timeFilter}
+              onChange={setTimeFilter}
+            />
             <p className="mt-1 text-xs leading-4 text-text-tertiary">
               {t("arrangements.subtitle")}
             </p>
@@ -3548,12 +3721,6 @@ function ArrangementsScreen({
                 onChange={setPlaceFilter}
               />
             </div>
-            <CalendarDateFilter
-              dates={calendarDates}
-              countByDate={arrangementCountByDate}
-              value={timeFilter}
-              onChange={setTimeFilter}
-            />
           </>
         )}
       </header>
